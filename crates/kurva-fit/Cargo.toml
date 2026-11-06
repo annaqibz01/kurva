@@ -1,0 +1,9 @@
+[package]
+name = "kurva-fit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kurva-types = { path = "../kurva-types" }
+thiserror.workspace = true

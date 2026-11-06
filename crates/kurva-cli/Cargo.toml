@@ -1,0 +1,18 @@
+[package]
+name = "kurva-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kurva"
+path = "src/main.rs"
+
+[dependencies]
+kurva-types = { path = "../kurva-types" }
+kurva-color = { path = "../kurva-color" }
+kurva-contour = { path = "../kurva-contour" }
+kurva-poly = { path = "../kurva-poly" }
+kurva-fit = { path = "../kurva-fit" }
+kurva-svg = { path = "../kurva-svg" }
+anyhow.workspace = true

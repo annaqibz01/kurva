@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["MUHAMMAD NAGIB <nagibmnagib01@gmail.com>"]
+authors = ["annaqibz01 <nagibmnagib01@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/annaqibz01/kurva"
 rust-version = "1.75"

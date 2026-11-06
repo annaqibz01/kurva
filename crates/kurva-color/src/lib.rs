@@ -39,8 +39,10 @@ pub fn quantize_rgb(
     }
 
     let mut samples = Vec::with_capacity(pixel_count);
-    for chunk in rgb_bytes.chunks_exact(3) {
-        samples.push(rgb_to_lab(chunk[0], chunk[1], chunk[2]));
+    for chunk in rgb_bytes.chunks(3) {
+        if let [red, green, blue] = chunk {
+            samples.push(rgb_to_lab(*red, *green, *blue));
+        }
     }
 
     let (centroids, indices) =

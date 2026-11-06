@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 kurva-types = { path = "../kurva-types" }
 thiserror.workspace = true
+image.workspace = true

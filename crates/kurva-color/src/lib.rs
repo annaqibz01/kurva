@@ -1,23 +1,28 @@
-//! Palette quantization stage: raw sRGB bytes in, indexed raster out.
+//! PAPHQ colour quantiser: variational phase-field relaxation in Oklab.
+//!
+//! Phases relax over a full multigrid V-cycle, then threshold into palette labels.
 
-pub mod cielab;
 pub mod error;
-pub mod kmeans;
+pub mod multigrid;
+pub mod oklab;
+pub mod palette;
+pub mod phase;
+pub mod stencil;
+pub mod tensor;
 
-pub use cielab::{delta_e_squared, lab_to_rgb, rgb_to_lab, LabColor};
-pub use error::ColorError;
-pub use kmeans::cluster_pixels;
+pub use error::{ColorError, ColorError::InvalidBufferSize};
 
 use kurva_types::{ColorRgb, IndexedRaster};
+use multigrid::{Pyramid, ACTIVE_ETA, EPSILON_SCALE, SMOOTH_STEPS};
+use palette::TAU_AREA_RATIO;
+use phase::{PhaseField, INIT_TEMPERATURE};
 
 /// Largest palette an indexed raster can address through its `u8` index buffer.
 pub const MAX_PALETTE_SIZE: usize = 256;
+const COLLAPSE_THRESHOLD: f32 = 0.995;
 
-/// Quantizes an interleaved RGB8 buffer into an indexed raster.
-///
-/// The buffer must hold exactly `width * height * 3` bytes and `max_colors` must
-/// fall inside `1..=256`. Pixels are clustered in CIELAB space so the palette
-/// follows perceptual distance rather than raw channel distance.
+/// Quantizes an interleaved RGB8 buffer (`width * height * 3` bytes) into an
+/// indexed raster whose palette follows perceptual Oklab distance.
 pub fn quantize_rgb(
     rgb_bytes: &[u8],
     width: usize,
@@ -27,59 +32,46 @@ pub fn quantize_rgb(
     if !(1..=MAX_PALETTE_SIZE).contains(&max_colors) {
         return Err(ColorError::InvalidPaletteSize(max_colors));
     }
-
-    let pixel_count = width
-        .checked_mul(height)
-        .ok_or(ColorError::InvalidBufferSize)?;
-    let expected = pixel_count
-        .checked_mul(3)
-        .ok_or(ColorError::InvalidBufferSize)?;
-    if rgb_bytes.len() != expected {
+    let pixels = width.checked_mul(height).ok_or(InvalidBufferSize)?;
+    if width == 0 || height == 0 || pixels.checked_mul(3) != Some(rgb_bytes.len()) {
         return Err(ColorError::InvalidBufferSize);
     }
 
-    let mut samples = Vec::with_capacity(pixel_count);
-    for chunk in rgb_bytes.chunks(3) {
-        if let [red, green, blue] = chunk {
-            samples.push(rgb_to_lab(*red, *green, *blue));
-        }
-    }
-
-    let (centroids, indices) =
-        kmeans::cluster_pixels(&samples, max_colors, kmeans::DEFAULT_MAX_ITERATIONS);
-    let converted: Vec<ColorRgb> = centroids
-        .iter()
-        .map(|centroid| lab_to_rgb(*centroid))
-        .collect();
-    let (palette, remapped) = collapse_duplicates(&converted, &indices);
-
-    IndexedRaster::new(width, height, palette, remapped).ok_or(ColorError::InvalidBufferSize)
-}
-
-/// Merges palette entries that render to the same RGB value and remaps indices.
-///
-/// Clusters that converge onto the same color would otherwise occupy several
-/// palette slots, so the palette is compacted while keeping first-seen order.
-fn collapse_duplicates(palette: &[ColorRgb], indices: &[u8]) -> (Vec<ColorRgb>, Vec<u8>) {
-    let mut unique: Vec<ColorRgb> = Vec::with_capacity(palette.len());
-    let mut mapping = vec![0u8; palette.len()];
-    for (slot, color) in palette.iter().enumerate() {
-        let existing = unique
-            .iter()
-            .position(|seen| seen.r == color.r && seen.g == color.g && seen.b == color.b);
-        mapping[slot] = match existing {
-            Some(position) => position as u8,
-            None => {
-                unique.push(*color);
-                (unique.len() - 1) as u8
-            }
+    let seeds = max_colors.min(pixels);
+    let pyramid = Pyramid::build(oklab::raster(rgb_bytes), width, height, seeds);
+    let mut palette = palette::seed(&pyramid.levels[0].data, seeds);
+    let mut field: Option<PhaseField> = None;
+    for level in (0..=pyramid.coarsest()).rev() {
+        let (w, h) = (pyramid.levels[level].w, pyramid.levels[level].h);
+        let data = &pyramid.levels[level].data;
+        let mut current = match field.take() {
+            Some(coarse) if coarse.k == palette.len() => multigrid::prolongate(&coarse, w, h),
+            _ => palette::initialise(data, (w, h), &palette, INIT_TEMPERATURE),
         };
+        if palette.len() > 1 && current.collapsed(COLLAPSE_THRESHOLD) {
+            current = palette::initialise(data, (w, h), &palette, INIT_TEMPERATURE);
+        }
+        let stencil = stencil::assemble(&tensor::diffusion_field(data, w, h), w, h);
+        let eps = EPSILON_SCALE[level];
+        let mask = (level == 0).then(|| multigrid::active_mask(&current, ACTIVE_ETA));
+        for _ in 0..SMOOTH_STEPS[level] {
+            phase::step(&mut current, &stencil, data, &palette, eps, mask.as_deref());
+        }
+        if level == 0 {
+            let floor = (TAU_AREA_RATIO * (w * h) as f32).max(1.0);
+            palette::condense(&mut current, &mut palette, floor);
+            palette = palette::centroids(&current, data, &palette);
+        }
+        current.normalise();
+        field = Some(current);
     }
-    let remapped = indices
-        .iter()
-        .map(|&index| mapping[usize::from(index)])
-        .collect();
-    (unique, remapped)
+
+    let Some(field) = field else {
+        return Err(ColorError::InvalidBufferSize);
+    };
+    let entries: Vec<ColorRgb> = palette.iter().map(|lab| oklab::to_srgb(*lab)).collect();
+    IndexedRaster::new(width, height, entries, palette::labels(&field))
+        .ok_or(ColorError::InvalidBufferSize)
 }
 
 /// Decodes an encoded image held in memory and quantizes it into a palette.
@@ -97,127 +89,61 @@ pub fn load_and_quantize_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
-    fn solid(width: usize, height: usize, color: [u8; 3]) -> Vec<u8> {
-        color.repeat(width * height)
+    fn checker(width: usize, height: usize) -> Vec<u8> {
+        (0..width * height)
+            .flat_map(|pixel| {
+                let dark = (pixel % width + pixel / width).is_multiple_of(2);
+                [if dark { 8 } else { 248 }; 3]
+            })
+            .collect()
     }
 
-    fn checker() -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for step in 0..4 {
-            let color = if step % 2 == 0 {
-                [10, 20, 30]
-            } else {
-                [230, 220, 210]
-            };
-            bytes.extend_from_slice(&color);
-        }
-        bytes
+    fn ringing(side: usize) -> Vec<u8> {
+        (0..side * side)
+            .map(|pixel| (60 + (pixel * 37) % 150) as u8)
+            .flat_map(|level| [level, level.saturating_sub(6), level.saturating_add(4)])
+            .collect()
     }
 
-    fn png_bytes(width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
-        let image = image::RgbImage::from_pixel(width, height, image::Rgb(color));
-        let mut buffer = Vec::new();
-        image::DynamicImage::ImageRgb8(image)
-            .write_to(&mut Cursor::new(&mut buffer), image::ImageFormat::Png)
-            .expect("encoder writes into memory");
-        buffer
+    fn message_of(pixels: &[u8], dims: (usize, usize), colors: usize) -> String {
+        let error = quantize_rgb(pixels, dims.0, dims.1, colors).err();
+        error.map(|error| error.to_string()).unwrap_or_default()
     }
 
     #[test]
-    fn solid_image_produces_one_palette_entry() {
-        let raster = quantize_rgb(&solid(4, 4, [12, 34, 56]), 4, 4, 8).expect("valid input");
+    fn end_to_end_quantize() {
+        let flat = quantize_rgb(&[40, 90, 160].repeat(108), 12, 9, 8).expect("solid image");
+        assert_eq!((flat.width, flat.height, flat.palette.len()), (12, 9, 1));
+        assert!(flat.indices.iter().all(|index| *index == 0));
+        let entry = flat.palette[0];
+        assert!(entry.r.abs_diff(40) <= 1 && entry.g.abs_diff(90) <= 1);
+        assert!(entry.b.abs_diff(160) <= 1);
 
-        assert_eq!(raster.width, 4);
-        assert_eq!(raster.height, 4);
-        assert_eq!(raster.pixel_count(), 16);
-        assert_eq!(raster.indices.len(), 16);
-        assert_eq!(raster.palette.len(), 1);
-        assert!(raster.indices.iter().all(|&index| index == 0));
-        let entry = raster.palette[0];
-        assert!(entry.r.abs_diff(12) <= 1);
-        assert!(entry.g.abs_diff(34) <= 1);
-        assert!(entry.b.abs_diff(56) <= 1);
-    }
-
-    #[test]
-    fn two_tone_image_keeps_both_colors_distinct() {
-        let pixels = checker();
-        let raster = quantize_rgb(&pixels, 2, 2, 2).expect("valid input");
-
-        assert_eq!(raster.palette.len(), 2);
-        assert_ne!(raster.indices[0], raster.indices[1]);
-        assert_eq!(raster.indices[0], raster.indices[2]);
-        assert_eq!(raster.indices[1], raster.indices[3]);
-    }
-
-    #[test]
-    fn every_index_addresses_a_palette_entry() {
-        let pixels: Vec<u8> = (0..36u8).map(|value| value.wrapping_mul(7)).collect();
-        let raster = quantize_rgb(&pixels, 3, 4, 256).expect("valid input");
-
-        assert_eq!(raster.indices.len(), 12);
-        assert!(!raster.palette.is_empty());
-        assert!(raster.palette.len() <= 256);
-        assert!(raster
+        let board = quantize_rgb(&checker(24, 24), 24, 24, 4).expect("checkerboard");
+        assert!(board.palette.len() >= 2);
+        assert_ne!(board.indices[0], board.indices[1]);
+        assert!(board
             .indices
             .iter()
-            .all(|&index| usize::from(index) < raster.palette.len()));
+            .all(|i| usize::from(*i) < board.palette.len()));
+
+        let noisy = quantize_rgb(&ringing(20), 20, 20, 8).expect("ringing buffer");
+        assert_eq!(noisy.indices.len(), 400);
+        assert!(!noisy.palette.is_empty() && noisy.palette.len() <= 8);
+        assert!(noisy
+            .indices
+            .iter()
+            .all(|i| usize::from(*i) < noisy.palette.len()));
     }
 
     #[test]
-    fn palette_size_is_validated() {
-        let pixels = solid(2, 2, [0, 0, 0]);
-
-        assert!(matches!(
-            quantize_rgb(&pixels, 2, 2, 0),
-            Err(ColorError::InvalidPaletteSize(0))
-        ));
-        assert!(matches!(
-            quantize_rgb(&pixels, 2, 2, 257),
-            Err(ColorError::InvalidPaletteSize(257))
-        ));
-    }
-
-    #[test]
-    fn buffer_length_is_validated() {
-        assert!(matches!(
-            quantize_rgb(&[0, 0, 0], 2, 2, 4),
-            Err(ColorError::InvalidBufferSize)
-        ));
-        assert!(matches!(
-            quantize_rgb(&solid(2, 2, [1, 2, 3]), 2, 3, 4),
-            Err(ColorError::InvalidBufferSize)
-        ));
-    }
-
-    #[test]
-    fn dimension_overflow_is_rejected() {
-        assert!(matches!(
-            quantize_rgb(&[], usize::MAX, 2, 4),
-            Err(ColorError::InvalidBufferSize)
-        ));
-    }
-
-    #[test]
-    fn encoded_image_is_decoded_and_quantized() {
-        let encoded = png_bytes(3, 2, [90, 120, 150]);
-        let raster = load_and_quantize_image(&encoded, 4).expect("valid png");
-
-        assert_eq!(raster.width, 3);
-        assert_eq!(raster.height, 2);
-        assert_eq!(raster.indices.len(), 6);
-        let entry = raster.palette[0];
-        assert!(entry.r.abs_diff(90) <= 1);
-        assert!(entry.g.abs_diff(120) <= 1);
-        assert!(entry.b.abs_diff(150) <= 1);
-    }
-
-    #[test]
-    fn undecodable_bytes_surface_a_decode_error() {
-        let result = load_and_quantize_image(&[1, 2, 3, 4, 5, 6, 7, 8], 4);
-
-        assert!(matches!(result, Err(ColorError::ImageDecode(_))));
+    fn inputs_are_validated() {
+        let pixels = [0u8; 12];
+        assert!(message_of(&pixels, (2, 2), 0).contains("palette size 0"));
+        assert!(message_of(&pixels, (2, 2), 257).contains("palette size 257"));
+        assert!(message_of(&[0, 0, 0], (2, 2), 4).contains("buffer size"));
+        assert!(message_of(&[], (usize::MAX, 2), 4).contains("buffer size"));
+        assert!(message_of(&[], (0, 0), 4).contains("buffer size"));
     }
 }

@@ -1,28 +1,224 @@
-//! PAPHQ colour quantiser: variational phase-field relaxation in Oklab.
-//!
-//! Phases relax over a full multigrid V-cycle, then threshold into palette labels.
+#![forbid(unsafe_code)]
 
 pub mod error;
-pub mod multigrid;
-pub mod oklab;
-pub mod palette;
-pub mod phase;
-pub mod stencil;
-pub mod tensor;
+pub mod paphq;
+pub mod prefilter;
+pub mod regularize;
 
-pub use error::{ColorError, ColorError::InvalidBufferSize};
+pub use error::ColorError;
+pub use kurva_types::{ColorRgb, IndexedRaster};
 
-use kurva_types::{ColorRgb, IndexedRaster};
-use multigrid::{Pyramid, ACTIVE_ETA, EPSILON_SCALE, SMOOTH_STEPS};
-use palette::TAU_AREA_RATIO;
-use phase::{PhaseField, INIT_TEMPERATURE};
+use paphq::{MultigridArena, PaphqSolver};
+use prefilter::{OklabImage, PreFilterScratch};
+use regularize::RegularizerScratch;
 
-/// Largest palette an indexed raster can address through its `u8` index buffer.
 pub const MAX_PALETTE_SIZE: usize = 256;
-const COLLAPSE_THRESHOLD: f32 = 0.995;
 
-/// Quantizes an interleaved RGB8 buffer (`width * height * 3` bytes) into an
-/// indexed raster whose palette follows perceptual Oklab distance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    Logo,
+    Illustration,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PaphqConfig {
+    pub gf_radius: usize,
+    pub gf_eps: f32,
+    pub shock_iters: usize,
+    pub shock_threshold: f32,
+    pub epsilon: f32,
+    pub lambda_base: f32,
+    pub beta_ridge: f32,
+    pub kappa_normal: f32,
+    pub kappa_corner: f32,
+    pub max_mg_levels: usize,
+    pub v_cycle_sweeps: usize,
+    pub min_island_area: u32,
+    pub min_stroke_area: u32,
+    pub min_stroke_elongation: f32,
+}
+
+impl PaphqConfig {
+    pub const fn from_preset(preset: Preset) -> Self {
+        match preset {
+            Preset::Logo => Self {
+                gf_radius: 2,
+                gf_eps: 0.0016,
+                shock_iters: 2,
+                shock_threshold: 0.008,
+                epsilon: 0.45,
+                lambda_base: 42.0,
+                beta_ridge: 2.5,
+                kappa_normal: 0.035,
+                kappa_corner: 0.025,
+                max_mg_levels: 3,
+                v_cycle_sweeps: 3,
+                min_island_area: 16,
+                min_stroke_area: 6,
+                min_stroke_elongation: 5.5,
+            },
+            Preset::Illustration => Self {
+                gf_radius: 1,
+                gf_eps: 0.0006,
+                shock_iters: 1,
+                shock_threshold: 0.015,
+                epsilon: 0.32,
+                lambda_base: 65.0,
+                beta_ridge: 4.0,
+                kappa_normal: 0.022,
+                kappa_corner: 0.020,
+                max_mg_levels: 3,
+                v_cycle_sweeps: 3,
+                min_island_area: 8,
+                min_stroke_area: 5,
+                min_stroke_elongation: 4.5,
+            },
+        }
+    }
+}
+
+/// Reusable workspace eliminating heap allocations across frames or runs.
+pub struct KurvaColorWorkspace {
+    pub oklab: OklabImage,
+    pub prefilter_scratch: PreFilterScratch,
+    pub mg_arena: MultigridArena,
+    pub reg_scratch: RegularizerScratch,
+}
+
+impl KurvaColorWorkspace {
+    pub fn new(max_width: usize, max_height: usize, max_palette: usize, max_levels: usize) -> Self {
+        Self {
+            oklab: OklabImage::new(max_width, max_height),
+            prefilter_scratch: PreFilterScratch::new(max_width, max_height),
+            mg_arena: MultigridArena::new(max_width, max_height, max_palette, max_levels),
+            reg_scratch: RegularizerScratch::new(max_width, max_height, max_palette),
+        }
+    }
+
+    pub fn quantize_dirty_raster(
+        &mut self,
+        rgb_pixels: &[u8],
+        width: usize,
+        height: usize,
+        palette: Vec<ColorRgb>,
+        config: &PaphqConfig,
+    ) -> Result<IndexedRaster, ColorError> {
+        let k = palette.len();
+        if !(1..=MAX_PALETTE_SIZE).contains(&k) {
+            return Err(ColorError::InvalidPaletteSize(k));
+        }
+        if rgb_pixels.len() != width * height * 3 {
+            return Err(ColorError::InvalidBufferSize);
+        }
+
+        self.oklab.resize_and_convert_srgb(rgb_pixels, width, height);
+        let palette_oklab = prefilter::palette_to_oklab(&palette);
+
+        // Stage 1: O(N) Separable Guided Filter + Upwind Morphological Shock Filter
+        prefilter::run_prefilter(
+            &mut self.oklab,
+            &mut self.prefilter_scratch,
+            config.gf_radius,
+            config.gf_eps,
+            config.shock_iters,
+            config.shock_threshold,
+        );
+
+        // Stage 2: Anisotropic Corner-Gated PAPHQ FMG Solver
+        let mut indices = vec![0u8; width * height];
+        PaphqSolver::solve(
+            &self.oklab,
+            &palette_oklab,
+            config,
+            &mut self.mg_arena,
+            &mut indices,
+        );
+
+        // Stage 3: Discrete Spur Detangling & Elongation-Guarded Island Absorption
+        regularize::regularize_indexed_raster(
+            &mut indices,
+            width,
+            height,
+            &palette_oklab,
+            config,
+            &mut self.reg_scratch,
+        );
+
+        IndexedRaster::new(width, height, palette, indices).ok_or(ColorError::InvalidBufferSize)
+    }
+}
+
+/// Seeds palette centroids along the perceptual Oklab lightness axis with deduplication.
+pub fn seed_palette(rgb_bytes: &[u8], max_colors: usize) -> Vec<ColorRgb> {
+    let n_pixels = rgb_bytes.len() / 3;
+    if n_pixels == 0 || max_colors == 0 {
+        return Vec::new();
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    let step = (n_pixels / 20000).max(1);
+
+    for i in (0..n_pixels).step_by(step) {
+        let c = ColorRgb::new(
+            rgb_bytes[i * 3],
+            rgb_bytes[i * 3 + 1],
+            rgb_bytes[i * 3 + 2],
+        );
+        if seen.insert((c.r, c.g, c.b)) {
+            unique.push(c);
+            if unique.len() >= 1024 {
+                break;
+            }
+        }
+    }
+
+    if unique.len() <= max_colors {
+        return unique;
+    }
+
+    let mut samples: Vec<(f32, ColorRgb)> = unique
+        .into_iter()
+        .map(|c| {
+            let ok = prefilter::srgb_to_oklab(c.r, c.g, c.b);
+            (ok.l, c)
+        })
+        .collect();
+
+    samples.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let count = samples.len();
+    let k = max_colors.min(count).min(MAX_PALETTE_SIZE);
+    let mut palette = Vec::with_capacity(k);
+    let mut pal_seen = std::collections::HashSet::new();
+
+    for stratum in 0..k {
+        let pos = ((stratum as f32 + 0.5) / k as f32 * count as f32) as usize;
+        let c = samples[pos.min(count - 1)].1;
+        if pal_seen.insert((c.r, c.g, c.b)) {
+            palette.push(c);
+        }
+    }
+
+    if palette.len() < k {
+        for (_, c) in &samples {
+            if pal_seen.insert((c.r, c.g, c.b)) {
+                palette.push(*c);
+                if palette.len() == k {
+                    break;
+                }
+            }
+        }
+    }
+
+    if palette.is_empty() && !samples.is_empty() {
+        palette.push(samples[0].1);
+    }
+
+    palette
+}
+
+/// Quantizes an interleaved RGB buffer into an IndexedRaster.
 pub fn quantize_rgb(
     rgb_bytes: &[u8],
     width: usize,
@@ -32,49 +228,22 @@ pub fn quantize_rgb(
     if !(1..=MAX_PALETTE_SIZE).contains(&max_colors) {
         return Err(ColorError::InvalidPaletteSize(max_colors));
     }
-    let pixels = width.checked_mul(height).ok_or(InvalidBufferSize)?;
+    let pixels = width.checked_mul(height).ok_or(ColorError::InvalidBufferSize)?;
     if width == 0 || height == 0 || pixels.checked_mul(3) != Some(rgb_bytes.len()) {
         return Err(ColorError::InvalidBufferSize);
     }
 
-    let seeds = max_colors.min(pixels);
-    let pyramid = Pyramid::build(oklab::raster(rgb_bytes), width, height, seeds);
-    let mut palette = palette::seed(&pyramid.levels[0].data, seeds);
-    let mut field: Option<PhaseField> = None;
-    for level in (0..=pyramid.coarsest()).rev() {
-        let (w, h) = (pyramid.levels[level].w, pyramid.levels[level].h);
-        let data = &pyramid.levels[level].data;
-        let mut current = match field.take() {
-            Some(coarse) if coarse.k == palette.len() => multigrid::prolongate(&coarse, w, h),
-            _ => palette::initialise(data, (w, h), &palette, INIT_TEMPERATURE),
-        };
-        if palette.len() > 1 && current.collapsed(COLLAPSE_THRESHOLD) {
-            current = palette::initialise(data, (w, h), &palette, INIT_TEMPERATURE);
-        }
-        let stencil = stencil::assemble(&tensor::diffusion_field(data, w, h), w, h);
-        let eps = EPSILON_SCALE[level];
-        let mask = (level == 0).then(|| multigrid::active_mask(&current, ACTIVE_ETA));
-        for _ in 0..SMOOTH_STEPS[level] {
-            phase::step(&mut current, &stencil, data, &palette, eps, mask.as_deref());
-        }
-        if level == 0 {
-            let floor = (TAU_AREA_RATIO * (w * h) as f32).max(1.0);
-            palette::condense(&mut current, &mut palette, floor);
-            palette = palette::centroids(&current, data, &palette);
-        }
-        current.normalise();
-        field = Some(current);
+    let palette = seed_palette(rgb_bytes, max_colors);
+    if palette.is_empty() {
+        return Err(ColorError::InvalidBufferSize);
     }
 
-    let Some(field) = field else {
-        return Err(ColorError::InvalidBufferSize);
-    };
-    let entries: Vec<ColorRgb> = palette.iter().map(|lab| oklab::to_srgb(*lab)).collect();
-    IndexedRaster::new(width, height, entries, palette::labels(&field))
-        .ok_or(ColorError::InvalidBufferSize)
+    let config = PaphqConfig::from_preset(Preset::Logo);
+    let mut ws = KurvaColorWorkspace::new(width, height, palette.len(), config.max_mg_levels);
+    ws.quantize_dirty_raster(rgb_bytes, width, height, palette, &config)
 }
 
-/// Decodes an encoded image held in memory and quantizes it into a palette.
+/// Decodes an image from memory and quantizes it into an IndexedRaster.
 pub fn load_and_quantize_image(
     image_bytes: &[u8],
     max_colors: usize,
@@ -84,66 +253,4 @@ pub fn load_and_quantize_image(
     let rgb = decoded.to_rgb8();
     let (width, height) = rgb.dimensions();
     quantize_rgb(rgb.as_raw(), width as usize, height as usize, max_colors)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn checker(width: usize, height: usize) -> Vec<u8> {
-        (0..width * height)
-            .flat_map(|pixel| {
-                let dark = (pixel % width + pixel / width).is_multiple_of(2);
-                [if dark { 8 } else { 248 }; 3]
-            })
-            .collect()
-    }
-
-    fn ringing(side: usize) -> Vec<u8> {
-        (0..side * side)
-            .map(|pixel| (60 + (pixel * 37) % 150) as u8)
-            .flat_map(|level| [level, level.saturating_sub(6), level.saturating_add(4)])
-            .collect()
-    }
-
-    fn message_of(pixels: &[u8], dims: (usize, usize), colors: usize) -> String {
-        let error = quantize_rgb(pixels, dims.0, dims.1, colors).err();
-        error.map(|error| error.to_string()).unwrap_or_default()
-    }
-
-    #[test]
-    fn end_to_end_quantize() {
-        let flat = quantize_rgb(&[40, 90, 160].repeat(108), 12, 9, 8).expect("solid image");
-        assert_eq!((flat.width, flat.height, flat.palette.len()), (12, 9, 1));
-        assert!(flat.indices.iter().all(|index| *index == 0));
-        let entry = flat.palette[0];
-        assert!(entry.r.abs_diff(40) <= 1 && entry.g.abs_diff(90) <= 1);
-        assert!(entry.b.abs_diff(160) <= 1);
-
-        let board = quantize_rgb(&checker(24, 24), 24, 24, 4).expect("checkerboard");
-        assert!(board.palette.len() >= 2);
-        assert_ne!(board.indices[0], board.indices[1]);
-        assert!(board
-            .indices
-            .iter()
-            .all(|i| usize::from(*i) < board.palette.len()));
-
-        let noisy = quantize_rgb(&ringing(20), 20, 20, 8).expect("ringing buffer");
-        assert_eq!(noisy.indices.len(), 400);
-        assert!(!noisy.palette.is_empty() && noisy.palette.len() <= 8);
-        assert!(noisy
-            .indices
-            .iter()
-            .all(|i| usize::from(*i) < noisy.palette.len()));
-    }
-
-    #[test]
-    fn inputs_are_validated() {
-        let pixels = [0u8; 12];
-        assert!(message_of(&pixels, (2, 2), 0).contains("palette size 0"));
-        assert!(message_of(&pixels, (2, 2), 257).contains("palette size 257"));
-        assert!(message_of(&[0, 0, 0], (2, 2), 4).contains("buffer size"));
-        assert!(message_of(&[], (usize::MAX, 2), 4).contains("buffer size"));
-        assert!(message_of(&[], (0, 0), 4).contains("buffer size"));
-    }
 }

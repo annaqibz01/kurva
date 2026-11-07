@@ -39,6 +39,7 @@ fn parameter_validation() {
 #[test]
 fn fit_rejects_degenerate_polyline() {
     let polyline = SimplifiedPolyline {
+        color_id: 0,
         points: Vec::new(),
         corner_indices: Vec::new(),
         is_closed: false,
@@ -108,5 +109,19 @@ fn assembled_quadratic_matches_the_energy() {
     assert!(
         (actual - predicted).abs() <= 1e-9 * scale,
         "actual {actual} predicted {predicted}"
+    );
+}
+
+#[test]
+fn fitted_path_inherits_polyline_color_id() {
+    let ring: Vec<Point2D<f64>> = (0..8)
+        .map(|step| arc_point(10.0, step as f64 * std::f64::consts::TAU / 8.0))
+        .collect();
+    let mut shape = polyline(ring, Vec::new(), true);
+    shape.color_id = 5;
+    let paths = fit_polylines(&[shape], 1.0);
+    assert!(
+        matches!(paths, Ok(ref paths) if paths.len() == 1 && paths[0].color_id == 5),
+        "color_id must survive the fitting stage"
     );
 }

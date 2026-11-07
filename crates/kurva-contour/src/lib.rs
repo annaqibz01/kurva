@@ -71,6 +71,7 @@ pub fn extract_contours(raster: &IndexedRaster) -> Result<Vec<RawContour>, Conto
             .map(|(x, y)| Point2D::new(x.round() as i32, y.round() as i32))
             .collect();
         contours.push(RawContour {
+            color_id: face.color_id,
             points,
             is_hole: face.is_hole,
         });

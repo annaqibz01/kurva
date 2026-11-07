@@ -16,7 +16,7 @@ pub fn fit_polyline(polyline: &SimplifiedPolyline, eps: f64) -> Result<VectorPat
         segments.extend(refine::fit_arc(&arc.points, eps, arc.periodic)?);
     }
     Ok(VectorPath {
-        color_id: 0,
+        color_id: polyline.color_id,
         segments,
         is_closed: polyline.is_closed,
     })

@@ -1,6 +1,44 @@
-/target
-/*.rs.bk
-*.swp
-*.bak
+# ==========================================
+# Rust & Cargo Build Artifacts
+# ==========================================
+/target/
+**/*.rs.bk
+*.bk
+
+# ==========================================
+# AI Context Generator Artifacts
+# ==========================================
+/contexts/
+directory-tree.txt
+.cache.json
+
+# ==========================================
+# Node.js & Script Tooling Dependencies
+# ==========================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==========================================
+# Environment & Secrets
+# ==========================================
+.env
+.env.*
+!.env.example
+
+# ==========================================
+# IDE & System Files
+# ==========================================
 .DS_Store
 Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~

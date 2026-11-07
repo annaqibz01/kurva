@@ -35,6 +35,22 @@ pub fn render_svg(
     width: usize,
     height: usize,
 ) -> Result<String, SvgError> {
+    render_svg_with_precision(paths, palette, width, height, DEFAULT_SCALE)
+}
+
+/// Serializes `paths` with an explicit fixed-point decimal scale.
+///
+/// `scale` is the number of decimal digits kept on the coordinate lattice
+/// (`2` = 0.01 delta, `3` = 0.001 delta); values outside the supported range
+/// are clamped by [`Lattice`]. Higher scales cost bytes but shrink the
+/// Hausdorff error between adjacent faces.
+pub fn render_svg_with_precision(
+    paths: &[VectorPath],
+    palette: &[ColorRgb],
+    width: usize,
+    height: usize,
+    scale: u32,
+) -> Result<String, SvgError> {
     if width == 0 || height == 0 {
         return Err(SvgError::EmptyCanvas { width, height });
     }
@@ -45,7 +61,7 @@ pub fn render_svg(
         return Err(SvgError::PaletteOutOfRange);
     }
 
-    let lattice = Lattice::new(DEFAULT_SCALE);
+    let lattice = Lattice::new(scale);
     let segments: usize = paths.iter().map(|path| path.segments.len()).sum();
     let capacity = 256 + segments.saturating_mul(80) + palette.len().saturating_mul(64);
 

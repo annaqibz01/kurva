@@ -110,10 +110,8 @@ fn detangle_spurs_corner_safe(indices: &mut [u8], tmp: &mut [u8], width: usize, 
             let mut best_label = n;
             let mut best_count = 0u8;
             for &cand in &candidates {
-                let cnt = (n == cand) as u8
-                    + (s == cand) as u8
-                    + (e == cand) as u8
-                    + (w == cand) as u8;
+                let cnt =
+                    (n == cand) as u8 + (s == cand) as u8 + (e == cand) as u8 + (w == cand) as u8;
                 if cnt > best_count {
                     best_count = cnt;
                     best_label = cand;

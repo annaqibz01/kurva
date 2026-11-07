@@ -1,17 +1,34 @@
-//! Curve fitting stage: simplified polylines in, cubic Bezier paths out.
+//! ORPHEUS-v2 variational cubic Bezier fitting.
+//!
+//! Orthogonal-Footpoint Regularised parameterisation over a Hermite-reduced basis:
+//! shared knots `Q_k`, shared tangent magnitudes `tau_k` and shared unit directions
+//! `d_k` make interior G1 continuity structural rather than a penalty. The inner
+//! bounded quadratic program (knot drift along the chord plus tangent magnitude) is
+//! solved by PDAS over a banded Cholesky factorisation; the outer Gauss-Newton step
+//! rotates the interior directions inside a trust region. Spans are split at the
+//! curvature-weighted worst deviation until the sample error drops below the
+//! requested threshold.
+
+mod angular;
+mod banded;
+mod curve;
+mod energy;
+mod error;
+mod measure;
+mod metric;
+mod parameter;
+mod pdas;
+mod refine;
+mod solve;
+#[cfg(test)]
+mod tests;
+mod vec2;
+
+pub use error::FitError;
 
 use kurva_types::{SimplifiedPolyline, VectorPath};
-use thiserror::Error;
 
-#[derive(Debug, Error)]
-pub enum FitError {
-    #[error("error threshold {0} must be finite and positive")]
-    InvalidThreshold(f64),
-    #[error("polyline {index} holds {points} vertices, at least 2 are required")]
-    DegeneratePolyline { index: usize, points: usize },
-}
-
-/// Placeholder fitting: validates its input and returns no paths until Schneider's fit lands.
+/// Fit every polyline into an independent `VectorPath` of cubic segments.
 pub fn fit_polylines(
     polylines: &[SimplifiedPolyline],
     error_threshold: f64,
@@ -25,23 +42,8 @@ pub fn fit_polylines(
             return Err(FitError::DegeneratePolyline { index, points });
         }
     }
-    Ok(Vec::new())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fit_rejects_degenerate_polyline() {
-        let polyline = SimplifiedPolyline {
-            points: Vec::new(),
-            corner_indices: Vec::new(),
-            is_closed: false,
-        };
-        let out = fit_polylines(&[polyline], 2.0);
-        assert!(matches!(out, Err(FitError::DegeneratePolyline { .. })));
-        assert!(fit_polylines(&[], 2.0).is_ok());
-        assert!(fit_polylines(&[], 0.0).is_err());
-    }
+    polylines
+        .iter()
+        .map(|polyline| solve::fit_polyline(polyline, error_threshold))
+        .collect()
 }

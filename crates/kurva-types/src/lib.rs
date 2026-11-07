@@ -87,6 +87,7 @@ impl IndexedRaster {
 /// Closed boundary loop of discrete pixel coordinates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawContour {
+    pub color_id: u8,
     pub points: Vec<Point2D<i32>>,
     pub is_hole: bool,
 }
@@ -97,6 +98,7 @@ pub type RawContourList = Vec<RawContour>;
 /// Polygon after RDP reduction, retaining the vertex indices classified as cusps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimplifiedPolyline {
+    pub color_id: u8,
     pub points: Vec<Point2D<f64>>,
     pub corner_indices: Vec<usize>,
     pub is_closed: bool,

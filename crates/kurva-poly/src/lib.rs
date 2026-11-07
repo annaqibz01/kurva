@@ -52,7 +52,7 @@ fn simplify_one(
 ) -> Result<SimplifiedPolyline, PolyError> {
     let mut pts = to_points(contour);
     if pts.len() < MIN_LOOP_VERTICES {
-        return Ok(to_polyline(pts, Vec::new()));
+        return Ok(to_polyline(contour.color_id, pts, Vec::new()));
     }
     // Canonical winding makes every later stage reversal-invariant: a clockwise input is
     // flipped so that mirrored contours produce the same output sequence.
@@ -60,11 +60,16 @@ fn simplify_one(
         pts.reverse();
     }
     let outcome = engine::simplify_loop(&pts, epsilon, corner_threshold_deg)?;
-    Ok(to_polyline(outcome.points, outcome.corner_indices))
+    Ok(to_polyline(
+        contour.color_id,
+        outcome.points,
+        outcome.corner_indices,
+    ))
 }
 
-fn to_polyline(points: Vec<V2>, corner_indices: Vec<usize>) -> SimplifiedPolyline {
+fn to_polyline(color_id: u8, points: Vec<V2>, corner_indices: Vec<usize>) -> SimplifiedPolyline {
     SimplifiedPolyline {
+        color_id,
         points: points
             .iter()
             .map(|point| Point2D::new(point.x, point.y))
@@ -95,6 +100,7 @@ mod tests {
 
     fn contour(points: &[(i32, i32)]) -> RawContour {
         RawContour {
+            color_id: 0,
             points: points.iter().map(|&(x, y)| Point2D::new(x, y)).collect(),
             is_hole: false,
         }
@@ -134,6 +140,7 @@ mod tests {
     #[test]
     fn simplify_validates_parameters_and_closes_loops() {
         let contour = RawContour {
+            color_id: 0,
             points: vec![Point2D::new(0, 0)],
             is_hole: false,
         };
@@ -180,6 +187,7 @@ mod tests {
         let mut reversed_points = forward.points.clone();
         reversed_points.reverse();
         let reversed = RawContour {
+            color_id: forward.color_id,
             points: reversed_points,
             is_hole: false,
         };
@@ -193,6 +201,18 @@ mod tests {
         };
         assert_eq!(left.points, right.points);
         assert_eq!(left.corner_indices, right.corner_indices);
+    }
+
+    #[test]
+    fn color_id_is_forwarded_from_contour() {
+        let mut square = pixel_square(10);
+        square.color_id = 3;
+        let out = match simplify_contours(&[square], 1.0, 120.0) {
+            Ok(out) => out,
+            Err(error) => panic!("expected success, got {error}"),
+        };
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].color_id, 3);
     }
 
     #[test]

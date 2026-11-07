@@ -16,3 +16,6 @@ kurva-poly = { path = "../kurva-poly" }
 kurva-fit = { path = "../kurva-fit" }
 kurva-svg = { path = "../kurva-svg" }
 anyhow.workspace = true
+
+[dev-dependencies]
+image.workspace = true

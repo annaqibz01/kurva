@@ -13,6 +13,7 @@ pub fn polyline(
     closed: bool,
 ) -> SimplifiedPolyline {
     SimplifiedPolyline {
+        color_id: 0,
         points,
         corner_indices: corners,
         is_closed: closed,

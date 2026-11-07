@@ -93,6 +93,7 @@ name = "kurva-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "kurva-color",
  "kurva-contour",
  "kurva-fit",

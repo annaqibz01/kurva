@@ -16,10 +16,10 @@ mod energy;
 mod error;
 mod measure;
 mod metric;
+mod network;
 mod parameter;
 mod pdas;
 mod refine;
-mod solve;
 #[cfg(test)]
 mod tests;
 mod vec2;
@@ -28,7 +28,8 @@ pub use error::FitError;
 
 use kurva_types::{SimplifiedPolyline, VectorPath};
 
-/// Fit every polyline into an independent `VectorPath` of cubic segments.
+/// Fit every polyline into a `VectorPath` of cubic segments with shared-edge
+/// memoization across adjacent regions.
 pub fn fit_polylines(
     polylines: &[SimplifiedPolyline],
     error_threshold: f64,
@@ -42,8 +43,5 @@ pub fn fit_polylines(
             return Err(FitError::DegeneratePolyline { index, points });
         }
     }
-    polylines
-        .iter()
-        .map(|polyline| solve::fit_polyline(polyline, error_threshold))
-        .collect()
+    network::fit_network(polylines, error_threshold)
 }

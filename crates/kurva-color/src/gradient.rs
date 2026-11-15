@@ -140,6 +140,39 @@ fn is_intermediate(lab: &[[f32; 3]], x: isize, y: isize, width: usize, height: u
     false
 }
 
+/// Returns `true` if at least one 8-neighbor lies within `max_dist_sq` of center,
+/// distinguishing connected 1D strokes from isolated 1x1 speckles.
+fn has_stroke_continuation(
+    lab: &[[f32; 3]],
+    x: isize,
+    y: isize,
+    width: usize,
+    height: usize,
+    max_dist_sq: f32,
+) -> bool {
+    let c = at_clamped(lab, x, y, width, height);
+    for dy in -1_isize..=1 {
+        for dx in -1_isize..=1 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let nx = x + dx;
+            let ny = y + dy;
+            if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
+                continue;
+            }
+            let n = lab[ny as usize * width + nx as usize];
+            let dl = c[0] - n[0];
+            let da = c[1] - n[1];
+            let db = c[2] - n[2];
+            if dl * dl + da * da + db * db < max_dist_sq {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Classifies every pixel into `FlatInterior` or `Transition` with adaptive fallback.
 pub fn classify(lab: &[[f32; 3]], width: usize, height: usize) -> GradientMap {
     let total = width * height;
@@ -157,7 +190,15 @@ pub fn classify(lab: &[[f32; 3]], width: usize, height: usize) -> GradientMap {
             let (mag, normal) = sobel(lab, xi, yi, width, height);
             magnitudes.push(mag);
             normals.push(normal);
-            let strong_ridge = is_ridge_or_valley(lab, xi, yi, width, height, MIN_RIDGE_CONTRAST_SQ);
+            let strong_ridge = is_ridge_or_valley(lab, xi, yi, width, height, MIN_RIDGE_CONTRAST_SQ)
+                && has_stroke_continuation(
+                    lab,
+                    xi,
+                    yi,
+                    width,
+                    height,
+                    MIN_RIDGE_CONTRAST_SQ * 4.0,
+                );
             let weak_ripple =
                 !strong_ridge && is_ridge_or_valley(lab, xi, yi, width, height, edge_sq);
             thin_strokes.push(strong_ridge);

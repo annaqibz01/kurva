@@ -70,6 +70,15 @@ pub fn simplify_contours(
         let mut out_pts = outcome.points;
         let mut corner_indices = outcome.corner_indices;
         let out_area = geometry::signed_area(&out_pts);
+        let abs_area = out_area.abs();
+        if abs_area < MIN_MICRO_AREA {
+            let perim = perimeter(&out_pts);
+            let is_thin_stroke =
+                abs_area > geometry::EPS && (perim * perim / abs_area) > MIN_ELONGATED_RATIO;
+            if !is_thin_stroke {
+                continue;
+            }
+        }
         if (!is_hole && out_area < 0.0) || (is_hole && out_area > 0.0) {
             out_pts.reverse();
             let count = out_pts.len();
@@ -81,6 +90,18 @@ pub fn simplify_contours(
         out.push(to_polyline(color_id, out_pts, corner_indices));
     }
     Ok(out)
+}
+
+const MIN_MICRO_AREA: f64 = 2.5;
+const MIN_ELONGATED_RATIO: f64 = 45.0;
+
+fn perimeter(pts: &[V2]) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..pts.len() {
+        let next = (i + 1) % pts.len();
+        sum += pts[i].distance(pts[next]);
+    }
+    sum
 }
 
 fn to_polyline(color_id: u8, points: Vec<V2>, corner_indices: Vec<usize>) -> SimplifiedPolyline {

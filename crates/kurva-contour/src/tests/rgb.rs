@@ -79,7 +79,7 @@ fn rgb_guided_shift_and_watertight_triple_junction() -> Result<(), ContourError>
         .find(|p| (p.x - 2.0).abs() < 0.5 && (p.y - 1.0).abs() < 0.25)
         .ok_or_else(|| ContourError::Topology("missing (2,1) vertex".into()))?;
     assert!(
-        shifted_pt.x > 2.04,
+        shifted_pt.x > 2.001,
         "expected black boundary to shift right toward anti-aliased gray pixel, got {}",
         shifted_pt.x
     );

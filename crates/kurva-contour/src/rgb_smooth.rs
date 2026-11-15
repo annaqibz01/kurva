@@ -5,11 +5,11 @@ use crate::error::ContourError;
 use crate::rgb_subpixel::VertexStar;
 
 /// Maximum cumulative displacement from initial/RGB-shifted anchor after smoothing.
-const MAX_SMOOTH_RADIUS: f64 = 0.65;
+const MAX_SMOOTH_RADIUS: f64 = 0.95;
 /// Number of tangential Laplacian smoothing passes on unlocked 2-material chains.
-const SMOOTH_PASSES: usize = 2;
-/// Cosine threshold for a geometric corner anchor (`turning angle >= 45 deg`, `cos <= 0.7071`).
-const CORNER_COS_THRESHOLD: f64 = std::f64::consts::FRAC_1_SQRT_2 + 1.0e-9;
+const SMOOTH_PASSES: usize = 6;
+/// Cosine threshold for a geometric corner anchor (`turning angle >= 50 deg`, `cos <= 0.6428`).
+const CORNER_COS_THRESHOLD: f64 = 0.6428;
 
 #[inline]
 fn is_turning_corner(p0: (f64, f64), v: (f64, f64), p1: (f64, f64)) -> bool {

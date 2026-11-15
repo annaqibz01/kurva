@@ -24,10 +24,10 @@ fn parse_error(items: &[&str]) -> String {
 #[test]
 fn defaults_follow_the_prd() {
     let args = config(&["-i", "in.png", "-o", "out.svg"]);
-    assert_eq!(args.colors, 4);
-    assert!((args.error_threshold - 0.50).abs() < f64::EPSILON);
-    assert!((args.corner_threshold - 125.0).abs() < f64::EPSILON);
-    assert!((args.epsilon - 0.45).abs() < f64::EPSILON);
+    assert_eq!(args.colors, 16);
+    assert!((args.error_threshold - 0.85).abs() < f64::EPSILON);
+    assert!((args.corner_threshold - 100.0).abs() < f64::EPSILON);
+    assert!((args.epsilon - 0.85).abs() < f64::EPSILON);
     assert_eq!(args.precision, 2);
     assert_eq!(args.preset, None);
     assert_eq!(args.verbosity, Verbosity::Normal);

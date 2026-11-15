@@ -43,33 +43,42 @@ pub fn simplify_contours(
         return Err(PolyError::InvalidParameter("corner_threshold_deg"));
     }
 
-    let prepared: Vec<(u8, Vec<V2>)> = contours
+    let prepared: Vec<(u8, bool, Vec<V2>)> = contours
         .iter()
         .filter_map(|contour| {
             let pts = to_points(contour);
-            (pts.len() >= MIN_LOOP_VERTICES).then_some((contour.color_id, pts))
+            (pts.len() >= MIN_LOOP_VERTICES).then_some((contour.color_id, contour.is_hole, pts))
         })
         .collect();
 
     let junctions = junction::detect_triple_junctions(
         prepared
             .iter()
-            .map(|(color_id, pts)| (*color_id, pts.as_slice())),
+            .map(|(color_id, _, pts)| (*color_id, pts.as_slice())),
     );
 
     let mut out = Vec::with_capacity(prepared.len());
-    for (color_id, mut pts) in prepared {
-        // Canonical winding makes every later stage reversal-invariant.
-        if geometry::signed_area(&pts) < 0.0 {
+    for (color_id, is_hole, mut pts) in prepared {
+        // Outer shells wind positively and holes wind negatively so SVG `nonzero`
+        // keeps enclosed counters (e.g. 'O', 'A', 'R') hollow.
+        let area = geometry::signed_area(&pts);
+        if (!is_hole && area < 0.0) || (is_hole && area > 0.0) {
             pts.reverse();
         }
         let locked = junction::locked_mask(&pts, &junctions);
         let outcome = engine::simplify_loop(&pts, epsilon, corner_threshold_deg, &locked)?;
-        out.push(to_polyline(
-            color_id,
-            outcome.points,
-            outcome.corner_indices,
-        ));
+        let mut out_pts = outcome.points;
+        let mut corner_indices = outcome.corner_indices;
+        let out_area = geometry::signed_area(&out_pts);
+        if (!is_hole && out_area < 0.0) || (is_hole && out_area > 0.0) {
+            out_pts.reverse();
+            let count = out_pts.len();
+            for idx in &mut corner_indices {
+                *idx = count - 1 - *idx;
+            }
+            corner_indices.sort_unstable();
+        }
+        out.push(to_polyline(color_id, out_pts, corner_indices));
     }
     Ok(out)
 }
@@ -108,143 +117,4 @@ fn to_points(contour: &RawContour) -> Vec<V2> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn contour(color_id: u8, points: &[(f64, f64)]) -> RawContour {
-        RawContour {
-            color_id,
-            points: points.iter().map(|&(x, y)| Point2D::new(x, y)).collect(),
-            is_hole: false,
-        }
-    }
-
-    fn pixel_square(size: i32) -> RawContour {
-        let mut points = Vec::new();
-        for x in 0..=size {
-            points.push((f64::from(x), 0.0));
-        }
-        for y in 1..=size {
-            points.push((f64::from(size), f64::from(y)));
-        }
-        for x in (0..size).rev() {
-            points.push((f64::from(x), f64::from(size)));
-        }
-        for y in (1..size).rev() {
-            points.push((0.0, f64::from(y)));
-        }
-        contour(0, &points)
-    }
-
-    fn regular_polygon(sides: usize, radius: f64) -> RawContour {
-        let points: Vec<(f64, f64)> = (0..sides)
-            .map(|k| {
-                let angle = std::f64::consts::TAU * k as f64 / sides as f64;
-                (radius * angle.cos(), radius * angle.sin())
-            })
-            .collect();
-        contour(0, &points)
-    }
-
-    #[test]
-    fn degenerate_loops_are_filtered_and_parameters_validated() {
-        let one_pt = contour(0, &[(0.0, 0.0)]);
-        let two_pt = contour(0, &[(0.0, 0.0), (1.0, 0.0), (1.0, 0.0)]);
-        let out = simplify_contours(&[one_pt, two_pt], 1.0, 120.0);
-        assert!(matches!(out, Ok(ref list) if list.is_empty()));
-        assert!(simplify_contours(&[], f64::NAN, 120.0).is_err());
-    }
-
-    #[test]
-    fn parameter_validation_rejects_out_of_range_inputs() {
-        let sample = [pixel_square(4)];
-        assert!(simplify_contours(&sample, -1.0, 120.0).is_err());
-        assert!(simplify_contours(&sample, f64::NAN, 120.0).is_err());
-        assert!(simplify_contours(&sample, f64::INFINITY, 120.0).is_err());
-        assert!(simplify_contours(&sample, 1.0, 0.0).is_err());
-        assert!(simplify_contours(&sample, 1.0, 180.5).is_err());
-        assert!(simplify_contours(&sample, 1.0, f64::NAN).is_err());
-        assert!(simplify_contours(&sample, 0.0, 180.0).is_ok());
-    }
-
-    #[test]
-    fn sharp_corner_preservation_keeps_the_four_square_cusps() {
-        let out = simplify_contours(&[pixel_square(40)], 1.0, 120.0)
-            .unwrap_or_else(|error| panic!("expected success, got {error}"));
-        let polyline = &out[0];
-        assert_eq!(polyline.points.len(), 4);
-        assert_eq!(polyline.corner_indices, vec![0, 1, 2, 3]);
-        for point in &polyline.points {
-            let on_corner =
-                (point.x == 0.0 || point.x == 40.0) && (point.y == 0.0 || point.y == 40.0);
-            assert!(on_corner, "corner moved to {point:?}");
-        }
-    }
-
-    #[test]
-    fn reversal_symmetry_invariance() {
-        let forward = contour(
-            0,
-            &[
-                (0.0, 0.0),
-                (12.25, 1.1),
-                (18.5, 9.0),
-                (9.0, 20.0),
-                (2.0, 14.0),
-                (-6.0, 7.0),
-            ],
-        );
-        let mut reversed_points = forward.points.clone();
-        reversed_points.reverse();
-        let reversed = RawContour {
-            color_id: forward.color_id,
-            points: reversed_points,
-            is_hole: false,
-        };
-        let left = simplify_contours(&[forward], 1.0, 120.0)
-            .unwrap_or_else(|error| panic!("expected success, got {error}"))
-            .remove(0);
-        let right = simplify_contours(&[reversed], 1.0, 120.0)
-            .unwrap_or_else(|error| panic!("expected success, got {error}"))
-            .remove(0);
-        assert_eq!(left.points, right.points);
-        assert_eq!(left.corner_indices, right.corner_indices);
-    }
-
-    #[test]
-    fn smooth_circle_no_false_cusps() {
-        let out = simplify_contours(&[regular_polygon(32, 10.0)], 1.0, 120.0)
-            .unwrap_or_else(|error| panic!("expected success, got {error}"));
-        let polyline = &out[0];
-        assert!(polyline.corner_indices.is_empty(), "false cusps detected");
-        assert!(polyline.points.len() >= 3 && polyline.points.len() < 32);
-    }
-
-    #[test]
-    fn triple_junction_locks_shared_vertex_as_cusp_across_all_regions() {
-        // Three regions meet at T-junction (10.0, 10.0), which is collinear on region 0's bottom edge.
-        let top = contour(
-            0,
-            &[(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (10.0, 10.0), (0.0, 10.0)],
-        );
-        let bottom_left = contour(1, &[(0.0, 10.0), (10.0, 10.0), (10.0, 20.0), (0.0, 20.0)]);
-        let bottom_right = contour(
-            2,
-            &[(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)],
-        );
-        let out = simplify_contours(&[top, bottom_left, bottom_right], 2.0, 120.0)
-            .unwrap_or_else(|error| panic!("expected success, got {error}"));
-        assert_eq!(out.len(), 3);
-        for polyline in &out {
-            let idx = polyline
-                .points
-                .iter()
-                .position(|p| (p.x - 10.0).abs() < 1.0e-9 && (p.y - 10.0).abs() < 1.0e-9)
-                .expect("triple-junction vertex must be preserved without drift");
-            assert!(
-                polyline.corner_indices.contains(&idx),
-                "triple-junction vertex must be locked in corner_indices"
-            );
-        }
-    }
-}
+mod tests;

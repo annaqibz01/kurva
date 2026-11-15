@@ -10,9 +10,9 @@ pub(super) const MIN_PRECISION: u32 = 2;
 pub(super) const MAX_PRECISION: u32 = 3;
 
 pub(super) const DEFAULT_COLORS: usize = 4;
-pub(super) const DEFAULT_ERROR_THRESHOLD: f64 = 2.0;
-pub(super) const DEFAULT_CORNER_THRESHOLD: f64 = 120.0;
-pub(super) const DEFAULT_EPSILON: f64 = 1.0;
+pub(super) const DEFAULT_ERROR_THRESHOLD: f64 = 0.75;
+pub(super) const DEFAULT_CORNER_THRESHOLD: f64 = 115.0;
+pub(super) const DEFAULT_EPSILON: f64 = 0.65;
 pub(super) const DEFAULT_PRECISION: u32 = MIN_PRECISION;
 
 pub const USAGE: &str = "\
@@ -25,9 +25,9 @@ OPTIONS:
     -i, --input <PATH>             Input raster image (PNG or JPEG)
     -o, --output <PATH>            Output SVG file path
     -c, --colors <INT>             Maximum palette colors [default: 4, range: 1..=256]
-        --error-threshold <FLOAT>  Bezier fitting tolerance [default: 2.0]
-        --corner-threshold <FLOAT> Cusp angle in degrees [default: 120.0]
-        --epsilon <FLOAT>          RDP polyline tolerance in pixels [default: 1.0]
+        --error-threshold <FLOAT>  Bezier fitting tolerance [default: 0.75]
+        --corner-threshold <FLOAT> Cusp angle in degrees [default: 115.0]
+        --epsilon <FLOAT>          RDP polyline tolerance in pixels [default: 0.65]
         --precision <2|3>          Coordinate decimal scale [default: 2]
         --preset <NAME>            logo | illustration | fast parameter bundle
     -v, --verbose                  Log per-stage timings and metrics

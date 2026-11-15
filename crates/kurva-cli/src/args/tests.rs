@@ -25,9 +25,9 @@ fn parse_error(items: &[&str]) -> String {
 fn defaults_follow_the_prd() {
     let args = config(&["-i", "in.png", "-o", "out.svg"]);
     assert_eq!(args.colors, 4);
-    assert!((args.error_threshold - 2.0).abs() < f64::EPSILON);
-    assert!((args.corner_threshold - 120.0).abs() < f64::EPSILON);
-    assert!((args.epsilon - 1.0).abs() < f64::EPSILON);
+    assert!((args.error_threshold - 0.75).abs() < f64::EPSILON);
+    assert!((args.corner_threshold - 115.0).abs() < f64::EPSILON);
+    assert!((args.epsilon - 0.65).abs() < f64::EPSILON);
     assert_eq!(args.precision, 2);
     assert_eq!(args.preset, None);
     assert_eq!(args.verbosity, Verbosity::Normal);

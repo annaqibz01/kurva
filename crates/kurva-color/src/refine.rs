@@ -6,7 +6,10 @@ use crate::region::dist_sq_oklab;
 const ICM_PASSES: usize = 2;
 
 /// Potts smoothness weight balancing data fidelity against speckle removal.
-const LAMBDA: f32 = 0.015;
+const LAMBDA: f32 = 0.004;
+
+/// Squared Oklab distance below which an assigned pixel is never overwritten by ICM.
+const PROTECT_DATA_SQ: f32 = 0.0025;
 
 /// Contrast sensitivity denominator `2 * sigma^2` in Oklab space.
 const TWO_SIGMA_SQ: f32 = 2.0 * 0.04 * 0.04;
@@ -14,10 +17,11 @@ const TWO_SIGMA_SQ: f32 = 2.0 * 0.04 * 0.04;
 /// Runs deterministic 8-connected contrast-sensitive ICM over the index map.
 ///
 /// Suppresses isolated compression speckles inside flat fills while preserving
-/// sharp corners and thin high-contrast strokes where `w_ij -> 0`.
+/// sharp corners and 1-2 px thin strokes.
 pub fn icm_cleanup(
     lab: &[[f32; 3]],
     palette_lab: &[[f32; 3]],
+    thin_strokes: &[bool],
     indices: &mut [u8],
     width: usize,
     height: usize,
@@ -34,6 +38,12 @@ pub fn icm_cleanup(
             for x in 0..width {
                 let idx = y * width + x;
                 let curr_label = indices[idx];
+                if thin_strokes.get(idx).copied().unwrap_or(false)
+                    || dist_sq_oklab(lab[idx], palette_lab[usize::from(curr_label)])
+                        < PROTECT_DATA_SQ
+                {
+                    continue;
+                }
 
                 neighbors.clear();
                 candidates.clear();

@@ -107,3 +107,77 @@ fn vector_magic_end_to_end_antialiased_triple_junction() {
         "expected compact line commands in SVG output"
     );
 }
+
+fn path_signed_area(path: &kurva_types::VectorPath) -> f64 {
+    let mut twice = 0.0;
+    for seg in &path.segments {
+        twice += seg.p0.x * seg.p3.y - seg.p3.x * seg.p0.y;
+    }
+    twice * 0.5
+}
+
+#[test]
+fn thin_stroke_and_hollow_hole_winding_preserved_in_svg() {
+    let width = 32usize;
+    let height = 32usize;
+    let mut rgb = Vec::with_capacity(width * height * 3);
+
+    for y in 0..height {
+        for x in 0..width {
+            let color = if y < 8 {
+                if x == 16 && (1..7).contains(&y) {
+                    [255, 255, 255]
+                } else {
+                    [115, 115, 115]
+                }
+            } else if (11..29).contains(&y) && (7..25).contains(&x) {
+                if (16..24).contains(&y) && (12..20).contains(&x) {
+                    [255, 255, 255]
+                } else {
+                    [0, 0, 0]
+                }
+            } else {
+                [255, 255, 255]
+            };
+            rgb.extend_from_slice(&color);
+        }
+    }
+
+    let raster = kurva_color::quantize_rgb(&rgb, width, height, 4).expect("quantize_rgb");
+    let black_id = raster
+        .palette
+        .iter()
+        .position(|c| c.r < 30 && c.g < 30 && c.b < 30)
+        .expect("black palette entry") as u8;
+    let white_id = raster
+        .palette
+        .iter()
+        .position(|c| c.r > 220 && c.g > 220 && c.b > 220)
+        .expect("white palette entry") as u8;
+
+    assert_eq!(
+        raster.indices[4 * width + 16],
+        white_id,
+        "1-px white stroke inside gray ribbon must survive quantization"
+    );
+
+    let contours =
+        kurva_contour::extract_contours_with_rgb(&raster, &rgb).expect("extract_contours_with_rgb");
+    let polylines =
+        kurva_poly::simplify_contours(&contours, 0.65, 115.0).expect("simplify_contours");
+    let paths = kurva_fit::fit_polylines(&polylines, 0.75).expect("fit_polylines");
+
+    let black_areas: Vec<f64> = paths
+        .iter()
+        .filter(|p| p.color_id == black_id)
+        .map(path_signed_area)
+        .collect();
+    assert!(
+        black_areas.iter().any(|&a| a > 100.0) && black_areas.iter().any(|&a| a < -10.0),
+        "black ring must have positive shell and negative hole winding: {black_areas:?}"
+    );
+
+    let svg = kurva_svg::render_svg(&paths, &raster.palette, width, height).expect("render_svg");
+    assert!(svg.contains("fill-rule=\"nonzero\""));
+    assert!(svg.contains("fill=\"#000000\""));
+}

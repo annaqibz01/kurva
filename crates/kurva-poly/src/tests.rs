@@ -160,3 +160,27 @@ fn shell_and_hole_enforce_opposite_winding_for_nonzero_fill() {
         "inner hole must wind negatively"
     );
 }
+
+#[test]
+fn micro_speckle_contours_are_pruned_while_thin_strokes_survive() {
+    let speckle = pixel_square(1);
+    let thin_stroke = contour(
+        1,
+        false,
+        &[(10.0, 2.0), (11.0, 2.0), (11.0, 14.0), (10.0, 14.0)],
+    );
+    let elongated_micro = contour(
+        2,
+        false,
+        &[(20.0, 2.0), (20.3, 2.0), (20.3, 9.0), (20.0, 9.0)],
+    );
+    let mut normal_box = pixel_square(5);
+    normal_box.color_id = 3;
+    let out = simplify_contours(&[speckle, thin_stroke, elongated_micro, normal_box], 0.5, 115.0)
+        .unwrap_or_else(|error| panic!("expected success, got {error}"));
+    let ids: Vec<u8> = out.iter().map(|p| p.color_id).collect();
+    assert!(!ids.contains(&0), "1x1 speckle (area=1.0) should be pruned");
+    assert!(ids.contains(&1), "1x12 thin stroke should survive");
+    assert!(ids.contains(&2), "elongated thin stroke (P^2/A > 45) should survive");
+    assert!(ids.contains(&3), "normal 5x5 box should survive");
+}

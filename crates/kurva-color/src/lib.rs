@@ -83,3 +83,5 @@ pub fn load_and_quantize_image(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_adaptive;

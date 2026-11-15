@@ -95,4 +95,78 @@ pub fn icm_cleanup(
             }
         }
     }
+
+    despeckle_components(thin_strokes, indices, width, height);
+}
+
+/// Minimum connected-component area preserved without thin-stroke support.
+const MIN_COMPONENT_AREA: usize = 3;
+
+/// Absorbs isolated 1-2 px non-stroke speckles into their most frequent 4-connected neighbor.
+fn despeckle_components(
+    thin_strokes: &[bool],
+    indices: &mut [u8],
+    width: usize,
+    height: usize,
+) {
+    let total = width * height;
+    let mut visited = vec![false; total];
+    let mut queue = std::collections::VecDeque::new();
+    let mut component = Vec::new();
+    let mut border_counts: Vec<(u8, usize)> = Vec::new();
+
+    for start in 0..total {
+        if visited[start] {
+            continue;
+        }
+        let label = indices[start];
+        visited[start] = true;
+        queue.clear();
+        component.clear();
+        border_counts.clear();
+        queue.push_back(start);
+
+        let mut has_thin_stroke = false;
+        while let Some(curr) = queue.pop_front() {
+            component.push(curr);
+            if thin_strokes.get(curr).copied().unwrap_or(false) {
+                has_thin_stroke = true;
+            }
+            let x = curr % width;
+            let y = curr / width;
+            let neighbors = [
+                x.checked_sub(1).map(|nx| y * width + nx),
+                (x + 1 < width).then(|| y * width + x + 1),
+                y.checked_sub(1).map(|ny| ny * width + x),
+                (y + 1 < height).then(|| (y + 1) * width + x),
+            ];
+            for n_idx in neighbors.into_iter().flatten() {
+                let n_label = indices[n_idx];
+                if n_label == label {
+                    if !visited[n_idx] {
+                        visited[n_idx] = true;
+                        queue.push_back(n_idx);
+                    }
+                } else if let Some((_, count)) =
+                    border_counts.iter_mut().find(|(c, _)| *c == n_label)
+                {
+                    *count += 1;
+                } else {
+                    border_counts.push((n_label, 1));
+                }
+            }
+        }
+
+        if component.len() >= MIN_COMPONENT_AREA || has_thin_stroke || border_counts.is_empty() {
+            continue;
+        }
+        let replacement = border_counts
+            .iter()
+            .copied()
+            .max_by(|&(la, ca), &(lb, cb)| ca.cmp(&cb).then_with(|| lb.cmp(&la)))
+            .map_or(label, |(l, _)| l);
+        for &p in &component {
+            indices[p] = replacement;
+        }
+    }
 }

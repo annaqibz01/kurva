@@ -181,3 +181,43 @@ fn thin_stroke_and_hollow_hole_winding_preserved_in_svg() {
     assert!(svg.contains("fill-rule=\"nonzero\""));
     assert!(svg.contains("fill=\"#000000\""));
 }
+
+#[test]
+fn adaptive_default_palette_despeckle_and_compact_svg_precision() {
+    let (w, h) = (40usize, 40usize);
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let c = if x == 3 && y == 3 {
+                [120, 120, 120]
+            } else if (8..18).contains(&x) && (8..18).contains(&y) {
+                [5, 5, 5]
+            } else if (22..32).contains(&x) && (8..18).contains(&y) {
+                [195, 30, 50]
+            } else if (12..28).contains(&x) && (22..32).contains(&y) {
+                [25, 145, 65]
+            } else if x < 20 {
+                [250, 250, 250]
+            } else {
+                [246, 246, 246]
+            };
+            rgb.extend_from_slice(&c);
+        }
+    }
+
+    let raster = kurva_color::quantize_rgb(&rgb, w, h, 16).expect("quantize_rgb");
+    assert!(raster.palette.len() <= 5, "palette did not adaptively merge: {:?}", raster.palette);
+    assert_eq!(raster.indices[3 * w + 3], raster.indices[0], "1x1 speckle should be absorbed");
+
+    let contours = kurva_contour::extract_contours_with_rgb(&raster, &rgb).expect("contours");
+    let polylines = kurva_poly::simplify_contours(&contours, 0.85, 100.0).expect("simplify");
+    let paths = kurva_fit::fit_polylines(&polylines, 0.85).expect("fit");
+    assert_eq!(paths.len(), 7, "expected 4 white shell/holes + 3 blocks without speckle");
+
+    let svg = kurva_svg::render_svg(&paths, &raster.palette, w, h).expect("render_svg");
+    assert!(svg.matches("<path ").count() <= 4);
+    for seg in svg.split('.').skip(1) {
+        let frac_digits = seg.bytes().take_while(|b| b.is_ascii_digit()).count();
+        assert!(frac_digits <= 2, "found >2 decimal places in SVG output");
+    }
+}

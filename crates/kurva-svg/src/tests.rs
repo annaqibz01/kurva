@@ -136,3 +136,19 @@ fn write_svg_matches_render_svg_and_compresses_collinear_cubics() {
             || path_data.contains('v')
     );
 }
+
+#[test]
+fn default_render_uses_two_decimal_precision() {
+    let path = VectorPath {
+        color_id: 0,
+        is_closed: true,
+        segments: vec![
+            cubic((1.126, 2.004), (3.1, 2.0), (4.2, 2.0), (5.254, 2.004)),
+            cubic((5.254, 2.004), (5.254, 4.0), (5.254, 6.0), (1.126, 7.0)),
+            cubic((1.126, 7.0), (1.126, 5.0), (1.126, 3.0), (1.126, 2.004)),
+        ],
+    };
+    let svg = render_svg(&[path], &[ink()], 10, 10).expect("render_svg");
+    assert!(svg.contains("1.13"), "expected 2-decimal rounding: {svg}");
+    assert!(!svg.contains("1.126"), "unexpected 3-decimal output: {svg}");
+}

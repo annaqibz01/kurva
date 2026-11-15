@@ -9,10 +9,10 @@ pub(super) const MIN_PRECISION: u32 = 2;
 /// Highest ALTO-v3 decimal lattice scale.
 pub(super) const MAX_PRECISION: u32 = 3;
 
-pub(super) const DEFAULT_COLORS: usize = 4;
-pub(super) const DEFAULT_ERROR_THRESHOLD: f64 = 0.50;
-pub(super) const DEFAULT_CORNER_THRESHOLD: f64 = 125.0;
-pub(super) const DEFAULT_EPSILON: f64 = 0.45;
+pub(super) const DEFAULT_COLORS: usize = 16;
+pub(super) const DEFAULT_ERROR_THRESHOLD: f64 = 0.85;
+pub(super) const DEFAULT_CORNER_THRESHOLD: f64 = 100.0;
+pub(super) const DEFAULT_EPSILON: f64 = 0.85;
 pub(super) const DEFAULT_PRECISION: u32 = MIN_PRECISION;
 
 pub const USAGE: &str = "\
@@ -24,10 +24,10 @@ USAGE:
 OPTIONS:
     -i, --input <PATH>             Input raster image (PNG or JPEG)
     -o, --output <PATH>            Output SVG file path
-    -c, --colors <INT>             Maximum palette colors [default: 4, range: 1..=256]
-        --error-threshold <FLOAT>  Bezier fitting tolerance [default: 0.50]
-        --corner-threshold <FLOAT> Cusp angle in degrees [default: 125.0]
-        --epsilon <FLOAT>          RDP polyline tolerance in pixels [default: 0.45]
+    -c, --colors <INT>             Maximum palette colors [default: 16, range: 1..=256]
+        --error-threshold <FLOAT>  Bezier fitting tolerance [default: 0.85]
+        --corner-threshold <FLOAT> Cusp angle in degrees [default: 100.0]
+        --epsilon <FLOAT>          RDP polyline tolerance in pixels [default: 0.85]
         --precision <2|3>          Coordinate decimal scale [default: 2]
         --preset <NAME>            logo | illustration | fast parameter bundle
     -v, --verbose                  Log per-stage timings and metrics

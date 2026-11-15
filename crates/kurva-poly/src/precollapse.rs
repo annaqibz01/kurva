@@ -46,9 +46,7 @@ fn collapse_span(view: &LoopView, left: usize, right: usize, state: &mut Precoll
         return;
     }
     if tube_fits(view, left, right) {
-        for index in left + 1..right {
-            state.keep[index] = false;
-        }
+        state.keep[left + 1..right].fill(false);
         state.forced.push((left, right));
         return;
     }

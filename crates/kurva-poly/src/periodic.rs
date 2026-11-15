@@ -34,8 +34,8 @@ pub(crate) fn anchor_offset(
         return index;
     }
     let mut peak: Option<(f64, usize)> = None;
-    for index in 0..n {
-        let response = prof.smoothed[index].abs();
+    for (index, smoothed) in prof.smoothed.iter().enumerate().take(n) {
+        let response = smoothed.abs();
         if peak.is_none_or(|(best, _)| response > best) {
             peak = Some((response, index));
         }
@@ -46,8 +46,8 @@ pub(crate) fn anchor_offset(
 /// Index ranges delimited by pinned cusps; a cusp-free loop yields the single arc `(0, n)`.
 pub(crate) fn arcs(view: &LoopView) -> Vec<(usize, usize)> {
     let mut anchors = vec![0usize];
-    for index in 1..view.n {
-        if view.cusp[index] {
+    for (index, is_cusp) in view.cusp.iter().enumerate().take(view.n).skip(1) {
+        if *is_cusp {
             anchors.push(index);
         }
     }

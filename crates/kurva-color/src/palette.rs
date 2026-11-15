@@ -1,179 +1,160 @@
-//! Palette management: stratified seeding, centroid updates, annihilation, coalescence.
+//! Pure-region palette clustering in Oklab space.
 
-use crate::oklab::delta_e_ok;
-use crate::phase::PhaseField;
+use kurva_types::ColorRgb;
 
-/// Phases carrying less than this share of the image are removed.
-pub const TAU_AREA_RATIO: f32 = 0.002;
-/// Just-noticeable Oklab distance; closer centroids coalesce into one phase.
-pub const TAU_JND: f32 = 1.0 / 255.0;
+use crate::oklab;
+use crate::region::{dist_sq_oklab, PureRegion};
 
-/// Deterministic seeding by equal-mass strata along the Oklab lightness axis.
-pub fn seed(raster: &[[f32; 3]], k: usize) -> Vec<[f32; 3]> {
-    let count = raster.len();
-    if count == 0 || k == 0 {
-        return Vec::new();
-    }
-    let mut order: Vec<usize> = (0..count).collect();
-    order.sort_by(|left, right| raster[*left][0].total_cmp(&raster[*right][0]));
-    (0..k)
-        .map(|stratum| {
-            let position = (stratum as f32 + 0.5) / k as f32 * count as f32;
-            raster[order[(position as usize).min(count - 1)]]
-        })
-        .collect()
+/// Final quantized palette in both Oklab and sRGB representations.
+pub struct PaletteModel {
+    pub lab: Vec<[f32; 3]>,
+    pub rgb: Vec<ColorRgb>,
 }
 
-/// Seeds the simplex from a palette with a sharp softmax over `Delta E_OK`.
-pub fn initialise(
-    raster: &[[f32; 3]],
-    dims: (usize, usize),
-    palette: &[[f32; 3]],
-    temperature: f32,
-) -> PhaseField {
-    let (w, h) = dims;
-    let k = palette.len().max(1);
-    let mut phi = vec![0.0f32; w * h * k];
-    let inverse = 1.0 / temperature.max(f32::EPSILON);
-    for (pixel, colour) in raster.iter().enumerate().take(w * h) {
-        let base = pixel * k;
-        let best = palette
-            .iter()
-            .fold(f32::INFINITY, |b, e| b.min(delta_e_ok(*colour, *e)));
-        let mut total = 0.0;
-        for (slot, entry) in phi[base..base + k].iter_mut().zip(palette.iter()) {
-            *slot = (-(delta_e_ok(*colour, *entry) - best) * inverse).exp();
-            total += *slot;
-        }
-        if total > 0.0 {
-            for slot in phi[base..base + k].iter_mut() {
-                *slot /= total;
-            }
-        } else {
-            phi[base] = 1.0;
-        }
-    }
-    PhaseField { w, h, k, phi }
-}
+/// Squared Oklab distance below which two palette entries are merged as identical.
+const MERGE_TOL_SQ: f32 = 0.012 * 0.012;
 
-/// Mass weighted centroid of every phase, keeping the previous estimate when a
-/// phase has been emptied by the simplex projection.
-pub fn centroids(field: &PhaseField, raster: &[[f32; 3]], palette: &[[f32; 3]]) -> Vec<[f32; 3]> {
-    let k = field.k;
-    let mut sums = vec![[0.0f32; 3]; k];
-    let mut mass = vec![0.0f32; k];
-    for (pixel, colour) in raster.iter().enumerate() {
-        let base = pixel * k;
-        for index in 0..k {
-            let weight = field.phi[base + index];
-            if weight > 0.0 {
-                mass[index] += weight;
-                for (slot, value) in sums[index].iter_mut().zip(colour.iter()) {
-                    *slot += weight * value;
+/// Number of weighted Lloyd refinement iterations.
+const LLOYD_ITERS: usize = 8;
+
+/// Clusters pure `FlatInterior` region centroids into at most `max_colors` palette entries.
+///
+/// `Transition` pixels are excluded so anti-aliased edge halos never pollute the palette.
+pub fn build(regions: &[PureRegion], fallback_lab: &[[f32; 3]], max_colors: usize) -> PaletteModel {
+    if regions.is_empty() {
+        let mut lab_entries = Vec::new();
+        for &c in fallback_lab {
+            if !lab_entries.iter().any(|&e| dist_sq_oklab(e, c) <= MERGE_TOL_SQ) {
+                lab_entries.push(c);
+                if lab_entries.len() == max_colors {
+                    break;
                 }
             }
         }
-    }
-    let estimate = |index: usize| {
-        let total = mass[index];
-        let sum = sums[index];
-        if total > 1e-6 {
-            [sum[0] / total, sum[1] / total, sum[2] / total]
-        } else {
-            palette.get(index).copied().unwrap_or([0.0; 3])
+        if lab_entries.is_empty() {
+            lab_entries.push([0.0, 0.0, 0.0]);
         }
-    };
-    (0..k).map(estimate).collect()
+        let rgb = lab_entries.iter().copied().map(oklab::to_srgb).collect();
+        return PaletteModel { lab: lab_entries, rgb };
+    }
+
+    let k = max_colors.min(regions.len()).max(1);
+    let mut centroids = furthest_point_init(regions, k);
+    weighted_lloyd(regions, &mut centroids);
+    let pruned = deduplicate_centroids(regions, &centroids);
+
+    let rgb = pruned.iter().copied().map(oklab::to_srgb).collect();
+    PaletteModel { lab: pruned, rgb }
 }
 
-/// Drops negligible phases and folds perceptually indistinguishable ones together.
-pub fn condense(field: &mut PhaseField, palette: &mut Vec<[f32; 3]>, tau_area: f32) {
-    let k = field.k;
-    if k == 0 || palette.len() < k {
-        return;
-    }
-    let mass = field.mass();
-    let heaviest = (0..k).fold(0, |b, i| if mass[i] > mass[b] { i } else { b });
-    let survivors: Vec<usize> = (0..k)
-        .filter(|index| mass[*index] >= tau_area || *index == heaviest)
+/// Deterministic weighted furthest-point initialization.
+///
+/// Starts from the largest-area region, then greedily selects the region maximizing
+/// minimum Oklab distance to existing centroids so tiny high-contrast features survive.
+fn furthest_point_init(regions: &[PureRegion], k: usize) -> Vec<[f32; 3]> {
+    let mut centroids = Vec::with_capacity(k);
+    let first_idx = regions
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, r)| r.pixel_count)
+        .map_or(0, |(idx, _)| idx);
+    centroids.push(regions[first_idx].mean_lab);
+
+    let mut min_dists: Vec<f32> = regions
+        .iter()
+        .map(|r| dist_sq_oklab(r.mean_lab, centroids[0]))
         .collect();
-    let mut representative = vec![usize::MAX; k];
-    let mut merged: Vec<usize> = Vec::new();
-    for &index in survivors.iter() {
-        let target = merged
-            .iter()
-            .find(|kept| delta_e_ok(palette[index], palette[**kept]) < TAU_JND)
-            .copied()
-            .unwrap_or(index);
-        representative[index] = target;
-        if target == index {
-            merged.push(index);
-        }
-    }
-    if merged.len() == k {
-        return;
-    }
-    let mut map = vec![usize::MAX; k];
-    for (position, &index) in merged.iter().enumerate() {
-        map[index] = position;
-    }
-    for &index in survivors.iter() {
-        map[index] = map[representative[index]];
-    }
-    let kept: Vec<[f32; 3]> = merged.iter().map(|&index| palette[index]).collect();
-    *field = remap(field, &map, merged.len());
-    *palette = kept;
-    field.normalise();
-}
 
-/// Re-indexes the phases through `map`, accumulating the merged densities.
-pub fn remap(field: &PhaseField, map: &[usize], k: usize) -> PhaseField {
-    let (w, h, k) = (field.w, field.h, k.max(1));
-    let mut phi = vec![0.0f32; field.w * field.h * k];
-    for pixel in 0..field.w * field.h {
-        let base = pixel * field.k;
-        let target = pixel * k;
-        for (index, value) in field.phi[base..base + field.k].iter().enumerate() {
-            if let Some(slot) = map.get(index).copied().filter(|slot| *slot < k) {
-                phi[target + slot] += *value;
+    while centroids.len() < k {
+        let mut best_idx = 0;
+        let mut best_dist = -1.0_f32;
+        for (i, &d) in min_dists.iter().enumerate() {
+            if d > best_dist {
+                best_dist = d;
+                best_idx = i;
+            }
+        }
+        if best_dist <= 1e-8 {
+            break;
+        }
+        let next_c = regions[best_idx].mean_lab;
+        centroids.push(next_c);
+        for (i, r) in regions.iter().enumerate() {
+            let d = dist_sq_oklab(r.mean_lab, next_c);
+            if d < min_dists[i] {
+                min_dists[i] = d;
             }
         }
     }
-    PhaseField { w, h, k, phi }
+    centroids
 }
 
-/// Sharp labels `pi(x) = argmax_i phi_i(x)`.
-pub fn labels(field: &PhaseField) -> Vec<u8> {
-    let mut labels = Vec::with_capacity(field.w * field.h);
-    for row in field.phi.chunks_exact(field.k) {
-        let peak = row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1));
-        labels.push(peak.map_or(0, |(index, _)| index).min(255) as u8);
+/// Refines centroids using `pixel_count`-weighted Lloyd iterations.
+fn weighted_lloyd(regions: &[PureRegion], centroids: &mut [[f32; 3]]) {
+    let k = centroids.len();
+    let mut sums = vec![[0.0_f64; 3]; k];
+    let mut weights = vec![0.0_f64; k];
+
+    for _ in 0..LLOYD_ITERS {
+        sums.fill([0.0; 3]);
+        weights.fill(0.0);
+
+        for r in regions {
+            let best = nearest_centroid(r.mean_lab, centroids);
+            let w = r.pixel_count as f64;
+            sums[best][0] += f64::from(r.mean_lab[0]) * w;
+            sums[best][1] += f64::from(r.mean_lab[1]) * w;
+            sums[best][2] += f64::from(r.mean_lab[2]) * w;
+            weights[best] += w;
+        }
+
+        for i in 0..k {
+            if weights[i] > 0.0 {
+                let inv = 1.0 / weights[i];
+                centroids[i] = [
+                    (sums[i][0] * inv) as f32,
+                    (sums[i][1] * inv) as f32,
+                    (sums[i][2] * inv) as f32,
+                ];
+            }
+        }
     }
-    labels
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::phase::INIT_TEMPERATURE;
-
-    #[test]
-    fn condense_merges_identical_centroids() {
-        let mut palette = vec![[0.4f32, 0.0, 0.0], [0.4, 0.0, 0.0], [0.8, 0.0, 0.0]];
-        let raster = vec![[0.4f32, 0.0, 0.0]; 9];
-        let mut field = initialise(&raster, (3, 3), &palette, INIT_TEMPERATURE);
-        condense(&mut field, &mut palette, 1.0);
-        assert_eq!((palette.len(), field.k), (1, 1));
-        assert!(field.phi.iter().all(|value| (value - 1.0).abs() < 1e-5));
+/// Drops empty centroids and merges centroids within `MERGE_TOL_SQ`.
+fn deduplicate_centroids(regions: &[PureRegion], centroids: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let mut counts = vec![0_usize; centroids.len()];
+    for r in regions {
+        let best = nearest_centroid(r.mean_lab, centroids);
+        counts[best] += r.pixel_count;
     }
 
-    #[test]
-    fn labels_point_at_the_dominant_phase() {
-        let palette = vec![[0.2f32, 0.0, 0.0], [0.8, 0.0, 0.0]];
-        let raster: Vec<[f32; 3]> = (0..4)
-            .map(|i| [if i % 2 == 0 { 0.2 } else { 0.8 }, 0.0, 0.0])
-            .collect();
-        let field = initialise(&raster, (2, 2), &palette, INIT_TEMPERATURE);
-        assert_eq!(labels(&field), vec![0, 1, 0, 1]);
+    let mut order: Vec<usize> = (0..centroids.len()).filter(|&i| counts[i] > 0).collect();
+    order.sort_by(|&a, &b| counts[b].cmp(&counts[a]).then_with(|| a.cmp(&b)));
+
+    let mut kept: Vec<[f32; 3]> = Vec::with_capacity(order.len());
+    for idx in order {
+        let c = centroids[idx];
+        if !kept.iter().any(|&k| dist_sq_oklab(k, c) <= MERGE_TOL_SQ) {
+            kept.push(c);
+        }
     }
+    if kept.is_empty() && !centroids.is_empty() {
+        kept.push(centroids[0]);
+    }
+    kept
+}
+
+#[inline]
+pub(crate) fn nearest_centroid(color: [f32; 3], centroids: &[[f32; 3]]) -> usize {
+    let mut best_idx = 0;
+    let mut best_dist = f32::INFINITY;
+    for (i, &c) in centroids.iter().enumerate() {
+        let d = dist_sq_oklab(color, c);
+        if d < best_dist {
+            best_dist = d;
+            best_idx = i;
+        }
+    }
+    best_idx
 }

@@ -57,6 +57,7 @@ pub fn to_srgb(lab: [f32; 3]) -> ColorRgb {
 }
 
 /// Euclidean metric in Oklab, `Delta E_OK`.
+#[allow(dead_code)]
 pub fn delta_e_ok(left: [f32; 3], right: [f32; 3]) -> f32 {
     let dl = left[0] - right[0];
     let da = left[1] - right[1];

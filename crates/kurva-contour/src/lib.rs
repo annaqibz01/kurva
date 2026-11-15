@@ -14,6 +14,7 @@
 mod arena;
 mod error;
 mod geometry;
+mod rgb_subpixel;
 mod scanline;
 mod subpixel;
 mod topology;
@@ -43,14 +44,21 @@ fn validate(raster: &IndexedRaster) -> Result<usize, ContourError> {
     Ok(expected)
 }
 
-/// Extract every material contour of `raster`.
-///
-/// The result holds one entry per boundary component, each flagged by
-/// [`RawContour::is_hole`], with the unbounded canvas exterior excluded.
-/// Vertices are mapped back onto the integer pixel-corner lattice after the
-/// subpixel pass.
-pub fn extract_contours(raster: &IndexedRaster) -> Result<Vec<RawContour>, ContourError> {
+fn extract_with(
+    raster: &IndexedRaster,
+    rgb_bytes: Option<&[u8]>,
+) -> Result<Vec<RawContour>, ContourError> {
     let expected = validate(raster)?;
+    if let Some(rgb) = rgb_bytes {
+        let expected_rgb = expected.saturating_mul(3);
+        if rgb.len() != expected_rgb {
+            return Err(ContourError::InconsistentRaster {
+                expected: expected_rgb,
+                actual: rgb.len(),
+            });
+        }
+    }
+
     let estimate = expected.min(CAPACITY_CEILING);
     let mut arena = Arena::with_capacity(estimate, estimate.saturating_mul(4), estimate);
 
@@ -58,17 +66,22 @@ pub fn extract_contours(raster: &IndexedRaster) -> Result<Vec<RawContour>, Conto
     topology::link_rotation(&mut arena)?;
     topology::extract_faces(&mut arena)?;
     subpixel::adjust_vertices(&mut arena, raster)?;
+    if let Some(rgb) = rgb_bytes {
+        rgb_subpixel::adjust_vertices_rgb(&mut arena, raster, rgb)?;
+    }
     geometry::classify_faces(&mut arena)?;
 
+    let face_count = u32::try_from(arena.faces.len())
+        .map_err(|_| ContourError::Topology("face arena exhausted 32-bit handles".to_string()))?;
     let mut contours = Vec::with_capacity(arena.faces.len());
-    for face_id in 0..arena.faces.len() as u32 {
+    for face_id in 0..face_count {
         let face = *arena.face(face_id)?;
         if face.is_exterior {
             continue;
         }
         let points = geometry::face_cycle_points(&arena, face_id)?
             .into_iter()
-            .map(|(x, y)| Point2D::new(x.round() as i32, y.round() as i32))
+            .map(|(x, y)| Point2D::new(x, y))
             .collect();
         contours.push(RawContour {
             color_id: face.color_id,
@@ -77,6 +90,24 @@ pub fn extract_contours(raster: &IndexedRaster) -> Result<Vec<RawContour>, Conto
         });
     }
     Ok(contours)
+}
+
+/// Extract every material contour of `raster` with subpixel coordinates.
+///
+/// The result holds one entry per boundary component, each flagged by
+/// [`RawContour::is_hole`], with the unbounded canvas exterior excluded.
+pub fn extract_contours(raster: &IndexedRaster) -> Result<Vec<RawContour>, ContourError> {
+    extract_with(raster, None)
+}
+
+/// Extract every material contour of `raster` using the original `rgb_bytes`
+/// to refine 2-material boundary vertices to subpixel accuracy while locking
+/// high-valence topological junctions.
+pub fn extract_contours_with_rgb(
+    raster: &IndexedRaster,
+    rgb_bytes: &[u8],
+) -> Result<Vec<RawContour>, ContourError> {
+    extract_with(raster, Some(rgb_bytes))
 }
 
 #[cfg(test)]

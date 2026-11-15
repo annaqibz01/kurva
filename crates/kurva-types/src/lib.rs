@@ -84,11 +84,11 @@ impl IndexedRaster {
     }
 }
 
-/// Closed boundary loop of discrete pixel coordinates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Closed boundary loop of subpixel coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawContour {
     pub color_id: u8,
-    pub points: Vec<Point2D<i32>>,
+    pub points: Vec<Point2D<f64>>,
     pub is_hole: bool,
 }
 

@@ -1,7 +1,7 @@
 //! AEGIS-v2 pipeline for one closed loop: curvature, clearance, collapse, visibility, DP.
 
 use crate::clearance::tolerance_field;
-use crate::curvature::{classify, profile};
+use crate::curvature::{classify, profile, Class};
 use crate::dp;
 use crate::error::PolyError;
 use crate::geometry::{analyze_closed, V2};
@@ -25,10 +25,16 @@ pub(crate) fn simplify_loop(
     pts: &[V2],
     epsilon: f64,
     corner_threshold_deg: f64,
+    locked_cusps: &[bool],
 ) -> Result<Outcome, PolyError> {
     let geom = analyze_closed(pts)?;
     let prof = profile(&geom);
-    let class = classify(&geom, &prof, corner_threshold_deg);
+    let mut class = classify(&geom, &prof, corner_threshold_deg);
+    for (kind, &locked) in class.iter_mut().zip(locked_cusps.iter()) {
+        if locked {
+            *kind = Class::Cusp;
+        }
+    }
     let eps = tolerance_field(&geom, epsilon);
     let offset = periodic::anchor_offset(&geom, &prof, &class);
     let view = LoopView::build(&geom, &prof, &class, &eps, offset);
@@ -117,7 +123,7 @@ mod tests {
         for step in (1..10).rev() {
             pts.push(V2::new(f64::from(step), 0.0));
         }
-        let outcome = match simplify_loop(&pts, 1.0, 120.0) {
+        let outcome = match simplify_loop(&pts, 1.0, 120.0, &[]) {
             Ok(outcome) => outcome,
             Err(error) => panic!("expected success, got {error}"),
         };

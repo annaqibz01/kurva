@@ -29,12 +29,12 @@ pub fn run(config: &CliConfig) -> Result<()> {
         }
     }
 
-    let raster = kurva_color::load_and_quantize_image(&bytes, config.colors)
+    let (raster, rgb_bytes) = kurva_color::load_and_quantize_image_with_rgb(&bytes, config.colors)
         .context("[ERROR] Color quantization failed")?;
     stats.times.color = watch.lap();
 
-    let contours =
-        kurva_contour::extract_contours(&raster).context("[ERROR] Contour extraction failed")?;
+    let contours = kurva_contour::extract_contours_with_rgb(&raster, &rgb_bytes)
+        .context("[ERROR] Contour extraction failed")?;
     stats.times.contour = watch.lap();
 
     let polylines =

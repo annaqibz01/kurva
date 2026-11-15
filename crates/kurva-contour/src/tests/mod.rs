@@ -1,7 +1,9 @@
-use super::{extract_contours, geometry, scanline, subpixel, topology, Arena, ContourError};
-use kurva_types::{ColorRgb, IndexedRaster};
+mod rgb;
 
-fn build(width: usize, height: usize, indices: Vec<u8>) -> IndexedRaster {
+use super::{geometry, scanline, subpixel, topology, Arena, ContourError, extract_contours};
+use kurva_types::{ColorRgb, IndexedRaster, Point2D};
+
+pub(super) fn build(width: usize, height: usize, indices: Vec<u8>) -> IndexedRaster {
     let palette = vec![ColorRgb::new(0, 0, 0), ColorRgb::new(255, 255, 255)];
     match IndexedRaster::new(width, height, palette, indices) {
         Some(raster) => raster,
@@ -19,15 +21,14 @@ fn uniform_raster_single_contour() -> Result<(), ContourError> {
     Ok(())
 }
 
-fn shoelace(points: &[kurva_types::Point2D<i32>]) -> f64 {
-    let mut twice = 0i64;
+fn shoelace(points: &[Point2D<f64>]) -> f64 {
+    let mut twice = 0.0;
     for index in 0..points.len() {
         let current = points[index];
         let next = points[(index + 1) % points.len()];
-        twice +=
-            i64::from(current.x) * i64::from(next.y) - i64::from(next.x) * i64::from(current.y);
+        twice += current.x * next.y - next.x * current.y;
     }
-    twice as f64 * 0.5
+    twice * 0.5
 }
 
 #[test]
@@ -45,8 +46,6 @@ fn nested_donut_hole_detection() -> Result<(), ContourError> {
     }
     let contours = extract_contours(&build(7, 7, indices))?;
 
-    // Three shells (outer frame, inner ring, core) and the two hole
-    // boundaries that close the frame and the ring.
     assert_eq!(contours.len(), 5);
     assert_eq!(
         contours.iter().filter(|contour| !contour.is_hole).count(),
@@ -54,12 +53,17 @@ fn nested_donut_hole_detection() -> Result<(), ContourError> {
     );
     assert_eq!(contours.iter().filter(|contour| contour.is_hole).count(), 2);
 
-    let mut areas: Vec<i64> = contours
+    let mut areas: Vec<f64> = contours
         .iter()
-        .map(|contour| shoelace(&contour.points).abs() as i64)
+        .map(|contour| shoelace(&contour.points).abs())
         .collect();
-    areas.sort_unstable();
-    assert_eq!(areas, vec![9, 9, 25, 25, 49]);
+    areas.sort_by(f64::total_cmp);
+    for (&actual, expected) in areas.iter().zip([8.0, 8.0, 24.0, 24.0, 49.0]) {
+        assert!(
+            (actual - expected).abs() < 1.0e-6,
+            "expected area {expected}, got {actual}"
+        );
+    }
 
     for contour in &contours {
         let area = shoelace(&contour.points);
@@ -67,7 +71,7 @@ fn nested_donut_hole_detection() -> Result<(), ContourError> {
         assert!(contour
             .points
             .iter()
-            .all(|point| point.x >= 0 && point.y >= 0));
+            .all(|point| point.x >= 0.0 && point.y >= 0.0));
     }
     Ok(())
 }
@@ -88,8 +92,8 @@ fn multi_material_grid_is_watertight() -> Result<(), ContourError> {
     for contour in &contours {
         assert!(contour.points.len() >= 4);
         let first = &contour.points[0];
-        assert!(first.x >= 0 && first.y >= 0);
-        assert!(first.x <= 6 && first.y <= 6);
+        assert!(first.x >= 0.0 && first.y >= 0.0);
+        assert!(first.x <= 6.0 && first.y <= 6.0);
     }
     Ok(())
 }
@@ -106,8 +110,6 @@ fn every_edge_is_traversed_twice() -> Result<(), ContourError> {
     topology::extract_faces(&mut arena)?;
     subpixel::adjust_vertices(&mut arena, &raster)?;
 
-    // The exterior face is included here on purpose: Theorem 1 covers the
-    // whole complex, so every half-edge must appear in exactly one cycle.
     let mut directed: Vec<((i32, i32), (i32, i32))> = Vec::new();
     for face_id in 0..arena.faces.len() as u32 {
         let points: Vec<(i32, i32)> = geometry::face_cycle_points(&arena, face_id)?

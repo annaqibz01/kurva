@@ -50,16 +50,27 @@ pub fn quantize_rgb(
         .ok_or(ColorError::InvalidBufferSize)
 }
 
+/// Decodes an encoded image byte stream into RGB8 and quantizes it, returning both
+/// the indexed raster and the decoded RGB8 pixel buffer.
+pub fn load_and_quantize_image_with_rgb(
+    image_bytes: &[u8],
+    max_colors: usize,
+) -> Result<(IndexedRaster, Vec<u8>), ColorError> {
+    let img = image::load_from_memory(image_bytes)
+        .map_err(|err| ColorError::ImageDecode(err.to_string()))?;
+    let rgb = img.into_rgb8();
+    let (width, height) = rgb.dimensions();
+    let raw = rgb.into_raw();
+    let raster = quantize_rgb(&raw, width as usize, height as usize, max_colors)?;
+    Ok((raster, raw))
+}
+
 /// Decodes an encoded image byte stream into RGB8 and quantizes it.
 pub fn load_and_quantize_image(
     image_bytes: &[u8],
     max_colors: usize,
 ) -> Result<IndexedRaster, ColorError> {
-    let img = image::load_from_memory(image_bytes)
-        .map_err(|err| ColorError::ImageDecode(err.to_string()))?;
-    let rgb = img.to_rgb8();
-    let (width, height) = rgb.dimensions();
-    quantize_rgb(rgb.as_raw(), width as usize, height as usize, max_colors)
+    load_and_quantize_image_with_rgb(image_bytes, max_colors).map(|(raster, _)| raster)
 }
 
 #[cfg(test)]

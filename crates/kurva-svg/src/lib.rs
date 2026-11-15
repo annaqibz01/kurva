@@ -39,11 +39,6 @@ pub fn render_svg(
 }
 
 /// Serializes `paths` with an explicit fixed-point decimal scale.
-///
-/// `scale` is the number of decimal digits kept on the coordinate lattice
-/// (`2` = 0.01 delta, `3` = 0.001 delta); values outside the supported range
-/// are clamped by [`Lattice`]. Higher scales cost bytes but shrink the
-/// Hausdorff error between adjacent faces.
 pub fn render_svg_with_precision(
     paths: &[VectorPath],
     palette: &[ColorRgb],
@@ -51,6 +46,43 @@ pub fn render_svg_with_precision(
     height: usize,
     scale: u32,
 ) -> Result<String, SvgError> {
+    let bytes = serialize_svg_bytes(paths, palette, width, height, scale)?;
+    String::from_utf8(bytes).map_err(|error| SvgError::Serialization(error.to_string()))
+}
+
+/// Streams a standalone SVG document into `writer` using the default precision.
+pub fn write_svg<W: std::io::Write>(
+    writer: &mut W,
+    paths: &[VectorPath],
+    palette: &[ColorRgb],
+    width: usize,
+    height: usize,
+) -> Result<(), SvgError> {
+    write_svg_with_precision(writer, paths, palette, width, height, DEFAULT_SCALE)
+}
+
+/// Streams a standalone SVG document into `writer` with an explicit fixed-point
+/// decimal scale.
+pub fn write_svg_with_precision<W: std::io::Write>(
+    writer: &mut W,
+    paths: &[VectorPath],
+    palette: &[ColorRgb],
+    width: usize,
+    height: usize,
+    scale: u32,
+) -> Result<(), SvgError> {
+    let bytes = serialize_svg_bytes(paths, palette, width, height, scale)?;
+    writer.write_all(&bytes)?;
+    Ok(())
+}
+
+fn serialize_svg_bytes(
+    paths: &[VectorPath],
+    palette: &[ColorRgb],
+    width: usize,
+    height: usize,
+    scale: u32,
+) -> Result<Vec<u8>, SvgError> {
     if width == 0 || height == 0 {
         return Err(SvgError::EmptyCanvas { width, height });
     }
@@ -79,8 +111,7 @@ pub fn render_svg_with_precision(
         writer::emit_compound(&mut out, &layer.paths, fill, lattice);
     }
     out.push_bytes(b"</svg>");
-
-    String::from_utf8(out.into_bytes()).map_err(|error| SvgError::Serialization(error.to_string()))
+    Ok(out.into_bytes())
 }
 
 fn emit_header(out: &mut IntToFixedASCII, width: usize, height: usize) {
@@ -204,5 +235,35 @@ mod tests {
         let document = render_svg(&[], &[], 8, 8);
         assert!(matches!(document, Ok(ref d) if d.starts_with("<svg") && d.ends_with("</svg>")));
         assert!(render_svg(&[], &[], 0, 8).is_err());
+    }
+
+    #[test]
+    fn write_svg_matches_render_svg_and_compresses_collinear_cubics() {
+        let diag = VectorPath {
+            color_id: 0,
+            is_closed: true,
+            segments: vec![
+                cubic((0.0, 0.0), (1.0 / 3.0, 2.0 / 3.0), (2.0 / 3.0, 4.0 / 3.0), (1.0, 2.0)),
+                cubic((1.0, 2.0), (1.0, 4.0), (1.0, 6.0), (1.0, 8.0)),
+                cubic((1.0, 8.0), (2.0 / 3.0, 8.0), (1.0 / 3.0, 8.0), (0.0, 8.0)),
+                cubic((0.0, 8.0), (0.0, 6.0), (0.0, 2.0), (0.0, 0.0)),
+            ],
+        };
+        let paths = [square(1), diag];
+        let palette = [ink(), paper()];
+        let rendered = render_svg(&paths, &palette, 8, 8).expect("render_svg");
+        let mut streamed = Vec::new();
+        write_svg(&mut streamed, &paths, &palette, 8, 8).expect("write_svg");
+        assert_eq!(streamed, rendered.as_bytes());
+        let path_start = rendered.find(" d=\"").expect("path d attribute");
+        let path_data = &rendered[path_start..];
+        assert!(!path_data.contains('C') && !path_data.contains('c'));
+        assert!(path_data.contains('L') || path_data.contains('l'));
+        assert!(
+            path_data.contains('H')
+                || path_data.contains('h')
+                || path_data.contains('V')
+                || path_data.contains('v')
+        );
     }
 }

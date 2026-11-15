@@ -14,4 +14,7 @@ pub enum SvgError {
     /// The serialized buffer was not valid UTF-8.
     #[error("serialization error: {0}")]
     Serialization(String),
+    /// Writing the SVG stream to the destination failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }

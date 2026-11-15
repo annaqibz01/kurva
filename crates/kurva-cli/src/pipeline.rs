@@ -1,6 +1,7 @@
 //! End-to-end vectorization: raster -> palette -> contours -> polylines -> bezier -> SVG.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 
 use anyhow::{Context, Result};
 
@@ -46,7 +47,15 @@ pub fn run(config: &CliConfig) -> Result<()> {
         .context("[ERROR] Bezier curve fitting failed")?;
     stats.times.fit = watch.lap();
 
-    let svg = kurva_svg::render_svg_with_precision(
+    let file = File::create(&config.output).with_context(|| {
+        format!(
+            "[ERROR] Failed to create SVG output: {}",
+            config.output.display()
+        )
+    })?;
+    let mut writer = BufWriter::new(file);
+    kurva_svg::write_svg_with_precision(
+        &mut writer,
         &paths,
         &raster.palette,
         raster.width,
@@ -54,16 +63,18 @@ pub fn run(config: &CliConfig) -> Result<()> {
         config.precision,
     )
     .context("[ERROR] SVG rendering failed")?;
-    stats.times.svg = watch.lap();
-
-    fs::write(&config.output, &svg).with_context(|| {
+    writer.flush().with_context(|| {
         format!(
-            "[ERROR] Failed to write SVG output: {}",
+            "[ERROR] Failed to flush SVG output: {}",
             config.output.display()
         )
     })?;
+    stats.times.svg = watch.lap();
     stats.times.total = watch.total();
 
+    let svg_bytes = fs::metadata(&config.output)
+        .map(|meta| meta.len() as usize)
+        .unwrap_or(0);
     stats.width = raster.width;
     stats.height = raster.height;
     stats.palette = raster.palette.len();
@@ -71,7 +82,7 @@ pub fn run(config: &CliConfig) -> Result<()> {
     stats.vertices = polylines.iter().map(|line| line.points.len()).sum();
     stats.spans = paths.iter().map(|path| path.segments.len()).sum();
     stats.paths = paths.len();
-    stats.svg_bytes = svg.len();
+    stats.svg_bytes = svg_bytes;
     stats.report(config.verbosity, &config.input, &config.output);
     Ok(())
 }

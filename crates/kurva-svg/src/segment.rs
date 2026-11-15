@@ -51,11 +51,12 @@ impl Segment {
         Some(LatticePoint::new(split_half(first_x), split_half(first_y)))
     }
 
-    /// True when `point` lies on the chord spanned by start and end.
+    /// True when `point` lies on the chord spanned by start and end within lattice rounding.
     fn on_chord(&self, point: LatticePoint) -> bool {
         let chord = self.end.offset_by(self.start);
         let arm = point.offset_by(self.start);
-        chord.cross(arm) == 0 && chord.dot(arm) >= 0 && chord.dot(chord) >= arm.dot(arm)
+        let tolerance = i128::from(chord.x.abs() + chord.y.abs()) / 2;
+        chord.cross(arm).abs() <= tolerance && chord.dot(arm) >= 0 && chord.dot(chord) >= arm.dot(arm)
     }
 }
 

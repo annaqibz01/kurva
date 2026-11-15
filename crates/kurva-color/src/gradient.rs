@@ -20,6 +20,9 @@ pub struct GradientMap {
 /// Base Oklab gradient magnitude threshold separating flat interiors from edges.
 const BASE_GRAD_THRESHOLD: f32 = 0.055;
 
+/// Minimum squared Oklab contrast against both opposing neighbors to qualify as a thin stroke.
+const MIN_RIDGE_CONTRAST_SQ: f32 = 0.018;
+
 /// Minimum fraction (percentage) of pixels required to be `FlatInterior`.
 const MIN_INTERIOR_PERCENT: usize = 15;
 
@@ -91,10 +94,16 @@ fn sobel(lab: &[[f32; 3]], x: isize, y: isize, width: usize, height: usize) -> (
     (grad_sq.sqrt(), normal)
 }
 
-/// Returns `true` when `(x, y)` is a sharp 1D ridge or valley thin-stroke core.
-fn is_ridge_or_valley(lab: &[[f32; 3]], x: isize, y: isize, width: usize, height: usize) -> bool {
+/// Returns `true` when `(x, y)` is a 1D ridge or valley exceeding `min_contrast_sq` on both sides.
+fn is_ridge_or_valley(
+    lab: &[[f32; 3]],
+    x: isize,
+    y: isize,
+    width: usize,
+    height: usize,
+    min_contrast_sq: f32,
+) -> bool {
     let c = at_clamped(lab, x, y, width, height);
-    let edge_sq = BASE_GRAD_THRESHOLD * BASE_GRAD_THRESHOLD;
     for (p_minus, p_plus) in opposing_pairs(lab, x, y, width, height) {
         let dm = [c[0] - p_minus[0], c[1] - p_minus[1], c[2] - p_minus[2]];
         let dp = [c[0] - p_plus[0], c[1] - p_plus[1], c[2] - p_plus[2]];
@@ -106,7 +115,11 @@ fn is_ridge_or_valley(lab: &[[f32; 3]], x: isize, y: isize, width: usize, height
         let dp_sq = dp[0] * dp[0] + dp[1] * dp[1] + dp[2] * dp[2];
         let span = [p_minus[0] - p_plus[0], p_minus[1] - p_plus[1], p_minus[2] - p_plus[2]];
         let span_sq = span[0] * span[0] + span[1] * span[1] + span[2] * span[2];
-        if dm_sq > edge_sq && dp_sq > edge_sq && span_sq < dm_sq && span_sq < dp_sq {
+        if dm_sq >= min_contrast_sq
+            && dp_sq >= min_contrast_sq
+            && span_sq < dm_sq
+            && span_sq < dp_sq
+        {
             return true;
         }
     }
@@ -130,6 +143,7 @@ fn is_intermediate(lab: &[[f32; 3]], x: isize, y: isize, width: usize, height: u
 /// Classifies every pixel into `FlatInterior` or `Transition` with adaptive fallback.
 pub fn classify(lab: &[[f32; 3]], width: usize, height: usize) -> GradientMap {
     let total = width * height;
+    let edge_sq = BASE_GRAD_THRESHOLD * BASE_GRAD_THRESHOLD;
     let mut magnitudes = Vec::with_capacity(total);
     let mut normals = Vec::with_capacity(total);
     let mut kinds = Vec::with_capacity(total);
@@ -143,9 +157,14 @@ pub fn classify(lab: &[[f32; 3]], width: usize, height: usize) -> GradientMap {
             let (mag, normal) = sobel(lab, xi, yi, width, height);
             magnitudes.push(mag);
             normals.push(normal);
-            let ridge = mag > BASE_GRAD_THRESHOLD && is_ridge_or_valley(lab, xi, yi, width, height);
-            thin_strokes.push(ridge);
-            let kind = if mag > BASE_GRAD_THRESHOLD && !ridge && is_intermediate(lab, xi, yi, width, height) {
+            let strong_ridge = is_ridge_or_valley(lab, xi, yi, width, height, MIN_RIDGE_CONTRAST_SQ);
+            let weak_ripple =
+                !strong_ridge && is_ridge_or_valley(lab, xi, yi, width, height, edge_sq);
+            thin_strokes.push(strong_ridge);
+            let kind = if !strong_ridge
+                && (weak_ripple
+                    || (mag > BASE_GRAD_THRESHOLD && is_intermediate(lab, xi, yi, width, height)))
+            {
                 PixelKind::Transition
             } else {
                 flat_count += 1;

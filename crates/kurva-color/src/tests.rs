@@ -181,3 +181,57 @@ fn ringing_and_invalid_inputs_handled() {
     ));
     assert!(matches!(quantize_rgb(&[], 0, 0, 4), Err(InvalidBufferSize)));
 }
+
+#[test]
+fn jpeg_ringing_is_suppressed_while_high_contrast_stroke_is_preserved() {
+    let width = 24;
+    let height = 16;
+    let mut buf = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let rgb = if x < 5 {
+                [0, 0, 0]
+            } else if x == 7 && (2..14).contains(&y) {
+                [215, 215, 215]
+            } else if x < 14 {
+                [245, 245, 245]
+            } else if x == 19 && (2..14).contains(&y) {
+                [250, 250, 250]
+            } else {
+                [85, 85, 85]
+            };
+            buf.extend_from_slice(&rgb);
+        }
+    }
+
+    let raster = quantize_rgb(&buf, width, height, 4).expect("quantization should succeed");
+    let white_idx = raster.indices[10];
+    let gray_idx = raster.indices[16];
+    assert_ne!(white_idx, gray_idx);
+
+    for y in 3..13 {
+        assert_eq!(
+            raster.indices[y * width + 7],
+            white_idx,
+            "low-contrast JPEG ringing at y={y} spawned a stray gray region"
+        );
+        let stroke_idx = raster.indices[y * width + 19];
+        assert_ne!(
+            stroke_idx, gray_idx,
+            "high-contrast 1px white stroke at y={y} was erased into ribbon gray"
+        );
+        assert!(
+            raster.palette[stroke_idx as usize].r >= 245,
+            "high-contrast 1px stroke at y={y} lost white luminance: {:?}",
+            raster.palette[stroke_idx as usize]
+        );
+    }
+    assert!(
+        raster
+            .palette
+            .iter()
+            .all(|c| !(180..=230).contains(&c.r)),
+        "stray JPEG ringing gray entry spawned in palette: {:?}",
+        raster.palette
+    );
+}

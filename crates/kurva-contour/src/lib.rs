@@ -14,6 +14,7 @@
 mod arena;
 mod error;
 mod geometry;
+mod rgb_smooth;
 mod rgb_subpixel;
 mod scanline;
 mod subpixel;

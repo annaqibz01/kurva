@@ -13,14 +13,10 @@ use kurva_types::{ColorRgb, IndexedRaster};
 
 /// Maximum RGB-guided normal displacement in pixels.
 pub const MAX_RGB_SHIFT: f64 = 0.45;
-/// Maximum cumulative displacement from initial/RGB-shifted anchor after smoothing.
-const MAX_SMOOTH_RADIUS: f64 = 0.65;
-/// Number of tangential Laplacian smoothing passes on unlocked 2-material chains.
-const SMOOTH_PASSES: usize = 2;
 
 #[derive(Default, Clone)]
-struct VertexStar {
-    outgoing: Vec<u32>,
+pub(crate) struct VertexStar {
+    pub(crate) outgoing: Vec<u32>,
     faces: Vec<u32>,
     colors: Vec<u8>,
     touches_exterior: bool,
@@ -41,7 +37,7 @@ impl VertexStar {
         }
     }
 
-    fn is_locked(&self) -> bool {
+    pub(crate) fn is_locked(&self) -> bool {
         self.touches_exterior || self.faces.len() >= 3 || self.colors.len() >= 3
     }
 }
@@ -183,53 +179,6 @@ pub fn adjust_vertices_rgb(
     }
 
     let anchors: Vec<(f64, f64)> = arena.vertices.iter().map(|v| (v.x, v.y)).collect();
-    smooth_chains(arena, &stars, &anchors, max_x, max_y)?;
-    Ok(())
-}
-
-fn smooth_chains(
-    arena: &mut Arena,
-    stars: &[VertexStar],
-    anchors: &[(f64, f64)],
-    max_x: f64,
-    max_y: f64,
-) -> Result<(), ContourError> {
-    let mut updates: Vec<(u32, f64, f64)> = Vec::new();
-    for _ in 0..SMOOTH_PASSES {
-        updates.clear();
-        for (v_idx, (vertex, star)) in arena.vertices.iter().zip(stars.iter()).enumerate() {
-            if is_null(vertex.outgoing_halfedge) || star.is_locked() || star.outgoing.len() != 2 {
-                continue;
-            }
-            if vertex.x <= 0.0 || vertex.x >= max_x || vertex.y <= 0.0 || vertex.y >= max_y {
-                continue;
-            }
-            let n0 = arena.halfedge(star.outgoing[0])?.target;
-            let n1 = arena.halfedge(star.outgoing[1])?.target;
-            let p0 = arena.vertex(n0)?;
-            let p1 = arena.vertex(n1)?;
-            let sx = 0.5 * vertex.x + 0.25 * (p0.x + p1.x);
-            let sy = 0.5 * vertex.y + 0.25 * (p0.y + p1.y);
-            let (ax, ay) = anchors[v_idx];
-            let dx = sx - ax;
-            let dy = sy - ay;
-            let dist = dx.hypot(dy);
-            let (cx, cy) = if dist > MAX_SMOOTH_RADIUS {
-                let scale = MAX_SMOOTH_RADIUS / dist;
-                (ax + dx * scale, ay + dy * scale)
-            } else {
-                (sx, sy)
-            };
-            let handle = u32::try_from(v_idx).map_err(|_| {
-                ContourError::Topology("vertex arena exhausted 32-bit handles".into())
-            })?;
-            updates.push((handle, cx, cy));
-        }
-        for &(handle, cx, cy) in &updates {
-            let vertex = arena.vertex_mut(handle)?;
-            vertex.x = cx;
-            vertex.y = cy;
-        }
-    }
+    crate::rgb_smooth::smooth_chains(arena, &stars, &anchors, max_x, max_y)?;
     Ok(())
 }
